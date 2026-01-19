@@ -122,7 +122,7 @@ response = query_engine.query("Your question here")
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `OPENAI_API_KEY` | OpenAI API key for GPT-based evaluation | — |
+| `MISTRAL_API_KEY` | Mistral API key for LLM-based evaluation | — |
 | `SIMILARITY_THRESHOLD` | Cosine similarity threshold for expansion | `0.75` |
 | `MAX_EXPAND` | Maximum sentences to expand in each direction | `5` |
 | `TOP_K` | Number of sentences to retrieve initially | `5` |

@@ -25,7 +25,7 @@ The expansion continues in both directions while `cosine_similarity(current, nei
 | Framework | LlamaIndex v0.10+ | Core orchestration |
 | Embeddings | HuggingFace (`BAAI/bge-small-en-v1.5` or `intfloat/multilingual-e5-large`) | Fast, good semantic preservation |
 | Vector Store | ChromaDB (local) or `SimpleVectorStore` (in-memory) | Demo-friendly |
-| LLM | OpenAI `gpt-3.5-turbo`/`gpt-4o` or Ollama (local) | For answer generation and evaluation |
+| LLM | Mistral (`mistral-small-latest`/`mistral-large-latest`) or Ollama (local) | For answer generation and evaluation |
 
 ## 4. Architecture
 

@@ -1,0 +1,33 @@
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Environment variables
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ChromaDB local storage
+chroma_db/
+
+# Results
+results/
+*.log
