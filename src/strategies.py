@@ -68,7 +68,7 @@ class NaiveChunkingStrategy(BaseStrategy):
 
     def _build_index(self) -> None:
         """Build index with naive chunking."""
-        splitter = SentenceSplitter(chunk_size=256, chunk_overlap=20)
+        splitter = SentenceSplitter(chunk_size=128, chunk_overlap=20)
         nodes = splitter.get_nodes_from_documents(self.documents)
         self.index = VectorStoreIndex(nodes)
 
@@ -184,3 +184,31 @@ class DynamicSemanticStrategy(BaseStrategy):
             min_window=self.min_window,
         )
         return expander.postprocess_nodes(nodes, QueryBundle(query_str=query))
+
+
+class SemanticSplitterStrategy(BaseStrategy):
+    """
+    Strategy using SemanticSplitterNodeParser for embeddings-based splitting.
+    """
+
+    @property
+    def name(self) -> str:
+        return "Semantic Splitter"
+
+    def _build_index(self) -> None:
+        """Build index with semantic splitter."""
+        from llama_index.core.node_parser import SemanticSplitterNodeParser
+
+        parser = SemanticSplitterNodeParser(
+            buffer_size=1, breakpoint_percentile_threshold=80, embed_model=Settings.embed_model
+        )
+        nodes = parser.get_nodes_from_documents(self.documents)
+        self.index = VectorStoreIndex(nodes)
+
+    def retrieve(self, query: str) -> list[NodeWithScore]:
+        """Retrieve using simple top-k."""
+        retriever = VectorIndexRetriever(index=self.index, similarity_top_k=self.top_k)
+        return retriever.retrieve(query)
+
+
+

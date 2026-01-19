@@ -46,10 +46,11 @@ class DynamicSemanticExpander(BaseNodePostprocessor):
     """
 
     docstore: BaseDocumentStore
-    threshold: float = 0.6  # Lowered from 0.75
+    threshold: float = 0.6
+    skip_threshold: float = 0.6  # Match threshold per user request
     max_expand: int = 5
-    min_window: int = 1  # Always take ±1 neighbor
-    min_chunk_length: int = 20  # Filter short garbage
+    min_window: int = 1
+    min_chunk_length: int = 20
 
     class Config:
         arbitrary_types_allowed = True
@@ -61,13 +62,6 @@ class DynamicSemanticExpander(BaseNodePostprocessor):
     ) -> list[NodeWithScore]:
         """
         Process retrieved nodes and expand context based on semantic similarity.
-
-        Args:
-            nodes: List of retrieved nodes with scores.
-            query_bundle: Optional query bundle (unused in current implementation).
-
-        Returns:
-            List of expanded nodes with merged context.
         """
         expanded = []
 
@@ -95,16 +89,7 @@ class DynamicSemanticExpander(BaseNodePostprocessor):
 
     def _expand_cluster(self, seed_node: TextNode) -> list[TextNode]:
         """
-        Expand context around seed node using HYBRID WINDOW approach.
-
-        - Always includes ±min_window neighbors (safety net)
-        - Expands further only if similarity > threshold
-
-        Args:
-            seed_node: The starting node to expand from.
-
-        Returns:
-            List of nodes forming the expanded cluster.
+        Expand context around seed node using HYBRID WINDOW approach with Skipping.
         """
         cluster = [seed_node]
 
@@ -118,14 +103,30 @@ class DynamicSemanticExpander(BaseNodePostprocessor):
             if prev_node is None:
                 break
 
-            # HYBRID: Always take min_window neighbors, then check similarity
+            # HYBRID: Always take min_window neighbors
             if i >= self.min_window:
                 if prev_node.embedding is None or current.embedding is None:
                     break
                 similarity = cosine_similarity(
                     np.array(current.embedding), np.array(prev_node.embedding)
                 )
+                
                 if similarity < self.threshold:
+                    # SENTENCE SKIP LOGIC
+                    # Try to bridge if the NEXT neighbor is very strong
+                    pprev_id = prev_node.metadata.get("prev_id")
+                    if pprev_id:
+                        pprev_node = self.docstore.get_node(pprev_id)
+                        if pprev_node and pprev_node.embedding is not None:
+                            p_similarity = cosine_similarity(
+                                np.array(current.embedding), np.array(pprev_node.embedding)
+                            )
+                            if p_similarity >= self.skip_threshold:
+                                # Bridge gap: add both and continue
+                                cluster.insert(0, prev_node)
+                                cluster.insert(0, pprev_node)
+                                current = pprev_node
+                                continue
                     break
 
             cluster.insert(0, prev_node)
@@ -141,14 +142,30 @@ class DynamicSemanticExpander(BaseNodePostprocessor):
             if next_node is None:
                 break
 
-            # HYBRID: Always take min_window neighbors, then check similarity
+            # HYBRID: Always take min_window neighbors
             if i >= self.min_window:
                 if next_node.embedding is None or current.embedding is None:
                     break
                 similarity = cosine_similarity(
                     np.array(current.embedding), np.array(next_node.embedding)
                 )
+                
                 if similarity < self.threshold:
+                    # SENTENCE SKIP LOGIC
+                    # Try to bridge if the NEXT neighbor is very strong
+                    nnext_id = next_node.metadata.get("next_id")
+                    if nnext_id:
+                        nnext_node = self.docstore.get_node(nnext_id)
+                        if nnext_node and nnext_node.embedding is not None:
+                            n_similarity = cosine_similarity(
+                                np.array(current.embedding), np.array(nnext_node.embedding)
+                            )
+                            if n_similarity >= self.skip_threshold:
+                                # Bridge gap: add both and continue
+                                cluster.append(next_node)
+                                cluster.append(nnext_node)
+                                current = nnext_node
+                                continue
                     break
 
             cluster.append(next_node)
