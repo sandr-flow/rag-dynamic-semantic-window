@@ -1,0 +1,39 @@
+Quantum mechanics is a fundamental theory in physics that describes the behavior of nature at and below the scale of atoms. It is the foundation of all quantum physics, which includes quantum chemistry, quantum field theory, quantum technology, and quantum information science.
+
+Quantum mechanics differs from classical physics in that energy, momentum, angular momentum, and other quantities of a bound system are restricted to discrete values. Objects have characteristics of both particles and waves, and there are limits to how accurately the value of a physical quantity can be predicted prior to its measurement.
+
+Quantum mechanics arose gradually from theories to explain observations that could not be reconciled with classical physics. Max Planck corrected the black-body radiation model by assuming that electromagnetic energy could only be emitted in quantized form. Albert Einstein then proposed that electromagnetic waves could only exist in discrete packets of energy, called photons.
+
+The Copenhagen interpretation is the most widely accepted interpretation of quantum systems. It states that a quantum particle does not have a definite state before being measured, and the act of measurement causes the wave function to collapse into one of the possible eigenstates.
+
+Superposition is a fundamental principle of quantum mechanics. It states that a physical system exists partly in all its particular theoretically possible states simultaneously. However, when measured, it gives a result corresponding to only one of the possible configurations.
+
+Quantum entanglement is a phenomenon that occurs when a group of particles are generated, interact, or share spatial proximity in such a way that the quantum state of each particle cannot be described independently of the state of the others. Measurements of physical properties of entangled particles can be found to be perfectly correlated.
+
+The Heisenberg uncertainty principle is a fundamental limit to the precision with which certain pairs of physical properties can be simultaneously known. The more precisely one property is measured, the less precisely the other can be controlled or determined.
+
+Schrödinger's equation is a fundamental equation in quantum mechanics that describes how the quantum state of a physical system changes over time. It is a wave equation in terms of the wave function, which predicts analytically and precisely the probability of events or outcomes.
+
+The wave function is a complex-valued function that contains all the information about a quantum system. The square of the absolute value of the wave function gives the probability density of finding a particle at a particular position.
+
+Quantum tunneling is a phenomenon where particles can pass through potential barriers that they classically should not be able to cross. This effect is responsible for many important processes, including nuclear fusion in stars and the operation of scanning tunneling microscopes.
+
+The double-slit experiment is a demonstration that light and matter can display characteristics of both classically defined waves and particles. When particles are sent through two slits, they create an interference pattern on a screen, demonstrating their wave-like behavior.
+
+Quantum decoherence is the loss of quantum coherence. In quantum mechanics, particles such as electrons behave like waves and are described by a wave function. Interaction with the environment causes the wave function to lose its quantum properties.
+
+The many-worlds interpretation is an interpretation of quantum mechanics that asserts that the universal wave function is objectively real and that there is no wave function collapse. According to this interpretation, all possible outcomes of quantum measurements are physically realized in some world.
+
+Quantum computing uses quantum bits or qubits to perform computations. Unlike classical bits that can only be in states 0 or 1, qubits can exist in superposition of both states simultaneously, enabling parallel computation.
+
+Quantum cryptography uses principles of quantum mechanics to secure communication. The most well-known application is quantum key distribution, which enables two parties to produce a shared random secret key known only to them.
+
+The Pauli exclusion principle states that two identical fermions cannot occupy the same quantum state simultaneously. This principle explains the structure of atoms, the periodic table, and the stability of matter.
+
+Spin is an intrinsic form of angular momentum carried by elementary particles. Unlike classical angular momentum, spin is a purely quantum phenomenon with no analogue in classical physics.
+
+The Stern-Gerlach experiment demonstrated that the spatial orientation of angular momentum is quantized. This experiment provided direct experimental evidence of the quantum nature of atomic magnetic moments.
+
+Quantum field theory combines classical field theory, special relativity, and quantum mechanics. It treats particles as excited states of their underlying quantum fields, which are more fundamental than the particles.
+
+The standard model of particle physics is a quantum field theory that describes the electromagnetic, weak, and strong nuclear interactions. It successfully describes most of the known elementary particles and their interactions.

@@ -31,3 +31,6 @@ chroma_db/
 # Results
 results/
 *.log
+
+# Chunk logs
+logs/
