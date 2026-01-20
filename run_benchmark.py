@@ -1,21 +1,20 @@
-"""Benchmark script for comparing retrieval strategies."""
+"""Simplified benchmark script for comparing retrieval strategies."""
 
 import argparse
 import asyncio
 import json
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Any
 
 import numpy as np
 from dotenv import load_dotenv
 from llama_index.core import Document, Settings
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-from llama_index.core.schema import TextNode
+from llama_index.embeddings.mistralai import MistralAIEmbedding
 
+from src.config import DEFAULT_BENCHMARK_CONFIG, DEFAULT_RETRIEVAL_CONFIG
 from src.metrics import compute_all_metrics
 from src.strategies import (
     DynamicSemanticStrategy,
@@ -25,218 +24,145 @@ from src.strategies import (
 )
 from src.utils import load_text_file
 
-# Load environment variables
 load_dotenv()
-
-# Pre-load NLTK to prevent thread-safety issues
-import nltk
-for resource in ['punkt', 'punkt_tab']:
-    try:
-        nltk.data.find(f'tokenizers/{resource}')
-    except LookupError:
-        nltk.download(resource)
-
-# Force load the lazy loader
-from nltk.tokenize import sent_tokenize
-try:
-    sent_tokenize("Dummy sentence to force load.")
-except Exception:
-    pass
-
-# Global Embedding Cache
-EMBEDDING_CACHE: Dict[str, List[float]] = {}
-
-# Default QA pairs for static mode
-DEFAULT_QA_PAIRS = [
-    {"question": "What is quantum superposition?", "answer": "multiple states simultaneously", "answer_sentence": "Quantum superposition is the principle that a quantum system can exist in multiple states simultaneously until measured."},
-    {"question": "How does quantum entanglement work?", "answer": "correlated states", "answer_sentence": "Quantum entanglement occurs when particles become correlated such that the quantum state of one particle cannot be described independently."},
-    {"question": "What is the Heisenberg uncertainty principle?", "answer": "cannot precisely measure both position and momentum", "answer_sentence": "The Heisenberg uncertainty principle states that one cannot simultaneously know both the exact position and momentum of a particle."},
-    {"question": "What is quantum tunneling?", "answer": "passing through barriers", "answer_sentence": "Quantum tunneling is the phenomenon where particles pass through potential barriers that would be insurmountable in classical physics."},
-    {"question": "What is the Copenhagen interpretation?", "answer": "wave function collapse upon measurement", "answer_sentence": "The Copenhagen interpretation posits that quantum systems exist in superposition until observed, at which point the wave function collapses."},
-]
 
 
 def parse_args():
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description="Benchmark retrieval strategies for RAG")
-    parser.add_argument("--source", choices=["static", "wikipedia"], default="static", help="Data source")
-    parser.add_argument("--num-questions", type=int, default=5, help="Questions per article")
-    parser.add_argument("--num-articles", type=int, default=1, help="Number of articles (Wikipedia mode)")
-    parser.add_argument("--article", type=str, default=None, help="Specific article title")
+    parser = argparse.ArgumentParser(description="Benchmark retrieval strategies")
+    parser.add_argument("--source", choices=["static", "wikipedia", "qasper"], default="static")
+    parser.add_argument(
+        "--num-questions", 
+        type=int, 
+        default=DEFAULT_BENCHMARK_CONFIG.default_num_questions,
+    )
+    parser.add_argument(
+        "--num-articles", 
+        type=int, 
+        default=DEFAULT_BENCHMARK_CONFIG.default_num_articles,
+    )
+    parser.add_argument("--article", type=str, default=None)
+    parser.add_argument(
+        "--min-length", 
+        type=int, 
+        default=DEFAULT_BENCHMARK_CONFIG.default_min_article_length,
+    )
     return parser.parse_args()
 
 
-def get_cached_embedding(text: str) -> List[float]:
-    """Get embedding from cache or compute it."""
-    if text not in EMBEDDING_CACHE:
-        EMBEDDING_CACHE[text] = Settings.embed_model.get_text_embedding(text)
-    return EMBEDDING_CACHE[text]
-
-
 def count_tokens(text: str) -> int:
+    """Rough token count (chars / 4)."""
     return len(text) // 4
 
 
-def calculate_coherence(nodes: list) -> float:
-    """Calculate average intra-cluster coherence using cached embeddings."""
-    if len(nodes) < 2:
-        return 1.0
-
-    similarities = []
-    for i in range(len(nodes) - 1):
-        # Use node.embedding if available, else cache
-        emb1 = nodes[i].node.embedding or get_cached_embedding(nodes[i].node.text)
-        emb2 = nodes[i + 1].node.embedding or get_cached_embedding(nodes[i + 1].node.text)
-        
-        sim = np.dot(emb1, emb2) / (np.linalg.norm(emb1) * np.linalg.norm(emb2))
-        similarities.append(sim)
-
-    return float(np.mean(similarities))
-
-
-def benchmark_single_article(
-    text: str,
-    qa_pairs: list[dict],
-    article_title: str,
-    strategies_config: dict
-) -> dict:
+def benchmark_article(text: str, qa_pairs: list[dict], title: str) -> dict:
     """
-    Run benchmark on a single article. 
-    Intended to be run in a thread.
+    Benchmark all strategies on a single article.
+    
+    Returns dict with metrics per strategy.
     """
-    try:
-        print(f"  🏁 Starting benchmark for: {article_title}")
+    documents = [Document(text=text)]
+    threshold = float(os.getenv("SIMILARITY_THRESHOLD", "0.6"))
+    max_expand = int(os.getenv("MAX_EXPAND", "5"))
+    
+    # Seed rejection log path
+    results_dir = Path(__file__).parent / "results"
+    seed_log_path = str(results_dir / "seed_rejections.jsonl")
+    failures_dir = results_dir / "failures"
+    failures_dir.mkdir(exist_ok=True)
+    
+    top_k = DEFAULT_RETRIEVAL_CONFIG.top_k
+    
+    strategies = [
+        NaiveChunkingStrategy(documents, top_k=top_k),
+        FixedWindowStrategy(documents, top_k=top_k),
+        SemanticSplitterStrategy(documents, top_k=top_k),
+        DynamicSemanticStrategy(
+            documents,
+            top_k=top_k,
+            threshold=threshold,
+            max_expand=max_expand,
+            seed_rejection_log_path=seed_log_path,
+        ),
+    ]
+    
+    results = {s.name: [] for s in strategies}
+    
+    for qa in qa_pairs:
+        question = qa["question"]
+        answer = qa.get("answer_sentence", qa.get("answer", ""))
         
-        # Initialize strategies locally for this thread/article
-        documents = [Document(text=text)]
-        strategies = [
-            NaiveChunkingStrategy(documents, top_k=5),
-            FixedWindowStrategy(documents, top_k=5),
-            SemanticSplitterStrategy(documents, top_k=5),
-            DynamicSemanticStrategy(
-                documents,
-                top_k=5,
-                threshold=strategies_config["threshold"],
-                max_expand=strategies_config["max_expand"],
-            ),
+        # Store chunks for failure logging
+        strategy_chunks = {}
+        strategy_metrics = {}
+        
+        for strategy in strategies:
+            nodes = strategy.retrieve(question)
+            texts = [n.node.text for n in nodes]
+            
+            metrics = compute_all_metrics(texts, answer, k=5)
+            metrics["tokens"] = count_tokens(" ".join(texts))
+            results[strategy.name].append(metrics)
+            
+            strategy_chunks[strategy.name] = texts
+            strategy_metrics[strategy.name] = metrics
+        
+        # Log failure: Dynamic Semantic missed but at least one other strategy hit
+        dynamic_hr = strategy_metrics.get("Dynamic Semantic", {}).get("hr@5", 0)
+        other_hrs = [
+            strategy_metrics.get(name, {}).get("hr@5", 0)
+            for name in ["Naive Chunking", "Fixed Window", "Semantic Splitter"]
         ]
-
-        article_metrics = {s.name: [] for s in strategies}
-
-        for qa in qa_pairs:
-            for strategy in strategies:
-                nodes = strategy.retrieve(qa["question"])
-                retrieved_texts = [n.node.text for n in nodes]
-                answer_sentence = qa.get("answer_sentence", qa.get("answer", ""))
-
-                ir_metrics = compute_all_metrics(retrieved_texts, answer_sentence, k=5)
-                token_count = count_tokens(" ".join(retrieved_texts))
-                coherence = calculate_coherence(nodes)
-
-                article_metrics[strategy.name].append({
-                    "token_count": token_count,
-                    "coherence": coherence,
-                    **ir_metrics,
-                })
-
-        # Calculate averages for this article
-        summary = {}
-        for s_name, metrics in article_metrics.items():
-            if metrics:
-                summary[s_name] = {
-                    "avg_hr@5": np.mean([m["hr@5"] for m in metrics]),
-                    "avg_mrr": np.mean([m["mrr"] for m in metrics]),
-                    "metrics_list": metrics # Keep full list for aggregation
-                }
         
-        print(f"  ✅ Finished benchmark for: {article_title}")
-        return {
-            "title": article_title,
-            "url": f"https://en.wikipedia.org/wiki/{article_title.replace(' ', '_')}",
-            "num_questions": len(qa_pairs),
-            "results": summary, 
-            "raw_metrics": article_metrics
-        }
+        if dynamic_hr == 0 and any(hr > 0 for hr in other_hrs):
+            # Generate safe filename
+            safe_title = "".join(c if c.isalnum() else "_" for c in title)[:50]
+            safe_question = "".join(c if c.isalnum() else "_" for c in question)[:30]
+            timestamp = datetime.now().strftime("%H%M%S")
+            filename = f"{safe_title}_{safe_question}_{timestamp}.json"
+            
+            failure_log = {
+                "article_title": title,
+                "article_url": f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}",
+                "question": question,
+                "expected_answer": answer,
+                "strategies": {
+                    name: {
+                        "hr@5": strategy_metrics[name]["hr@5"],
+                        "mrr": strategy_metrics[name]["mrr"],
+                        "tokens": strategy_metrics[name]["tokens"],
+                        "chunks": strategy_chunks[name],
+                    }
+                    for name in strategy_chunks
+                },
+            }
+            
+            with open(failures_dir / filename, "w", encoding="utf-8") as f:
+                json.dump(failure_log, f, indent=2, ensure_ascii=False)
+    
+    return {"title": title, "results": results, "num_questions": len(qa_pairs)}
 
-    except Exception as e:
-        print(f"  ❌ Error benchmarking {article_title}: {e}")
-        return None
+
+async def fetch_wikipedia_articles(count: int, specific_title: str = None, min_length: int = 2000):
+    """Fetch Wikipedia articles."""
+    from src.wikipedia_loader import fetch_article_by_title, fetch_random_articles_batch
+    
+    if specific_title:
+        title, text = fetch_article_by_title(specific_title)
+        return [(title, text)]
+    return await fetch_random_articles_batch(count, min_length=min_length)
 
 
-async def process_wikipedia_mode(args):
-    """Async orchestration for Wikipedia mode."""
+async def generate_qa_pairs(articles: list, num_questions: int):
+    """Generate QA pairs for articles (rate-limited)."""
     from src.question_generator import generate_qa_pairs_async
-    from src.wikipedia_loader import fetch_article_by_title, fetch_random_article
-
-    tasks = []
-    num_articles = 1 if args.article else args.num_articles
     
-    # 1. Fetch and Generate QA Pairs (Buffered/Rate Limited)
-    print(f"\n🚀 Phase 1: Fetching {num_articles} articles and generating QA pairs (Async)...")
-    
-    article_data = []
-
-    for i in range(num_articles):
-        # Fetch Text (Sync, run in thread to not block)
-        if args.article:
-            title, text = await asyncio.to_thread(fetch_article_by_title, args.article)
-        else:
-            title, text = await asyncio.to_thread(fetch_random_article)
-
-        print(f"  📄 [{i+1}/{num_articles}] Fetched: {title} ({len(text)} chars)")
-        
-        # Start async QA generation
-        # We process strictly sequentially regarding the START time to respect 1 RPS
-        # But we await the result so we don't spam requests.
-        # Actually proper 1 RPS means we can fire one every 1s. 
-        # But for simplicity and safety, we'll do:
-        # Request -> Await -> Sleep 1.1s. 
-        # This is safe but slower. 
-        # Fast way: Fire Request, Sleep 1.1s, Fire Request (don't await yet).
-        
-        task = asyncio.create_task(generate_qa_pairs_async(text, num_questions=args.num_questions))
-        article_data.append({"title": title, "text": text, "task": task})
-        
-        if i < num_articles - 1:
-            await asyncio.sleep(1.1)  # Rate limit safety
-
-    # Wait for all QA tasks to finish
-    print("  ⏳ Waiting for QA generation to complete...")
-    for item in article_data:
-        item["qa_pairs"] = await item["task"]
-        if not item["qa_pairs"]:
-            print(f"  ⚠️ No QA pairs for {item['title']}")
-    
-    valid_articles = [a for a in article_data if a.get("qa_pairs")]
-    print(f"  ✅ Ready to benchmark {len(valid_articles)} articles.")
-
-    # 2. Parallel Benchmarking
-    print(f"\n🚀 Phase 2: Benchmarking articles in parallel threads...")
-    
-    strategies_config = {
-        "threshold": float(os.getenv("SIMILARITY_THRESHOLD", "0.6")),
-        "max_expand": int(os.getenv("MAX_EXPAND", "5")),
-    }
-
     results = []
-    
-    # Run CPU/Embedding heavy benchmark in threads
-    with ThreadPoolExecutor(max_workers=min(4, os.cpu_count() or 1)) as executor:
-        futures = {
-            executor.submit(
-                benchmark_single_article, 
-                a["text"], 
-                a["qa_pairs"], 
-                a["title"], 
-                strategies_config
-            ): a for a in valid_articles
-        }
-        
-        for future in as_completed(futures):
-            res = future.result()
-            if res:
-                results.append(res)
-
+    for i, (title, text) in enumerate(articles):
+        qa = await generate_qa_pairs_async(text, num_questions=num_questions)
+        results.append({"title": title, "text": text, "qa_pairs": qa or []})
+        if i < len(articles) - 1:
+            await asyncio.sleep(DEFAULT_BENCHMARK_CONFIG.mistral_rps_delay)
     return results
 
 
@@ -245,90 +171,101 @@ def run_benchmark():
     args = parse_args()
     
     print("=" * 60)
-    print("Dynamic Semantic Window Benchmark (Optimized)")
+    print("Dynamic Semantic Window Benchmark")
     print("=" * 60)
-
-    # Load model once
-    embed_model_name = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
-    print(f"Loading embedding model: {embed_model_name}")
-    Settings.embed_model = HuggingFaceEmbedding(model_name=embed_model_name)
-
-    start_time = time.time()
     
-    final_results = {
-        "timestamp": datetime.now().isoformat(),
-        "config": vars(args),
-        "articles": [],
-        "aggregate_metrics": {}
-    }
-
-    processed_articles = []
-
-    if args.source == "wikipedia":
-        processed_articles = asyncio.run(process_wikipedia_mode(args))
+    # Load embedding model
+    embedding_provider = os.getenv("EMBEDDING_PROVIDER", "huggingface").lower()
+    
+    if embedding_provider == "mistral":
+        print("Loading: mistral-embed")
+        Settings.embed_model = MistralAIEmbedding(
+            model_name="mistral-embed",
+            api_key=os.getenv("MISTRAL_API_KEY"),
+        )
     else:
-        # Static Mode
-        data_path = Path(__file__).parent / "data" / "source_text.txt"
-        print(f"Loading test data from: {data_path}")
-        text = load_text_file(str(data_path))
+        model_name = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
+        print(f"Loading: {model_name}")
+        Settings.embed_model = HuggingFaceEmbedding(model_name=model_name)
+    
+    start = time.time()
+    
+    # Get articles + QA pairs
+    if args.source == "wikipedia":
+        print(f"\n📥 Fetching {args.num_articles} Wikipedia articles (min length: {args.min_length})...")
+        articles = asyncio.run(fetch_wikipedia_articles(args.num_articles, args.article, args.min_length))
+        print(f"✅ Fetched {len(articles)} articles")
         
-        strategies_config = {
-            "threshold": float(os.getenv("SIMILARITY_THRESHOLD", "0.6")),
-            "max_expand": int(os.getenv("MAX_EXPAND", "5")),
-        }
+        print(f"\n📝 Generating QA pairs...")
+        data = asyncio.run(generate_qa_pairs(articles, args.num_questions))
+        data = [d for d in data if d["qa_pairs"]]  # Filter failed
+        print(f"✅ Generated QA for {len(data)} articles")
+    elif args.source == "qasper":
+        from src.qasper_loader import fetch_qasper_articles
         
-        res = benchmark_single_article(text, DEFAULT_QA_PAIRS, "Static Text", strategies_config)
-        if res:
-            processed_articles.append(res)
-
-    # Aggregation
-    all_raw_metrics = {} # strategy -> list of all metrics dicts
-
-    for art_res in processed_articles:
-        final_results["articles"].append({
-            "title": art_res["title"],
-            "url": art_res["url"],
-            "num_questions": art_res["num_questions"]
-        })
+        print(f"\n📥 Loading {args.num_articles} QASPER articles (min length: {args.min_length})...")
+        articles = fetch_qasper_articles(args.num_articles, args.min_length)
+        print(f"✅ Loaded {len(articles)} articles")
         
-        for strat, metrics_list in art_res["raw_metrics"].items():
-            if strat not in all_raw_metrics:
-                all_raw_metrics[strat] = []
-            all_raw_metrics[strat].extend(metrics_list)
-
-    # Compute Aggregates
-    print(f"\n📊 AGGREGATE RESULTS ({len(processed_articles)} articles, {len(all_raw_metrics.get('DynamicSemanticStrategy', []))} questions):")
-    print("-" * 90)
-    print(f"{'Strategy':20} | {'Tokens':>7} | {'Coher':>5} | {'HR@5':>5} | {'MRR':>5} | {'P@5':>5} | {'NDCG':>5}")
-    print("-" * 90)
-
-    for strat, metrics in all_raw_metrics.items():
+        print(f"\n📝 Generating QA pairs...")
+        data = asyncio.run(generate_qa_pairs(articles, args.num_questions))
+        data = [d for d in data if d["qa_pairs"]]  # Filter failed
+        print(f"✅ Generated QA for {len(data)} articles")
+    else:
+        # Static mode
+        text_path = Path(__file__).parent / "data" / "source_text.txt"
+        text = load_text_file(str(text_path))
+        data = [{
+            "title": "Static",
+            "text": text,
+            "qa_pairs": [
+                {"question": "What is quantum superposition?", "answer_sentence": "Quantum superposition is the principle that a quantum system can exist in multiple states simultaneously until measured."},
+                {"question": "What is quantum entanglement?", "answer_sentence": "Quantum entanglement occurs when particles become correlated such that the quantum state of one particle cannot be described independently."},
+                {"question": "What is the Heisenberg uncertainty principle?", "answer_sentence": "The Heisenberg uncertainty principle states that one cannot simultaneously know both the exact position and momentum of a particle."},
+            ]
+        }]
+    
+    # Run benchmarks
+    print(f"\n🔬 Benchmarking {len(data)} articles...")
+    all_results = []
+    for item in data:
+        print(f"  → {item['title']}")
+        result = benchmark_article(item["text"], item["qa_pairs"], item["title"])
+        all_results.append(result)
+    
+    # Aggregate
+    agg = {}
+    for result in all_results:
+        for strategy, metrics in result["results"].items():
+            if strategy not in agg:
+                agg[strategy] = []
+            agg[strategy].extend(metrics)
+    
+    # Print results
+    total_q = sum(r["num_questions"] for r in all_results)
+    print(f"\n📊 RESULTS ({len(all_results)} articles, {total_q} questions)")
+    print("-" * 75)
+    print(f"{'Strategy':20} | {'Tokens':>7} | {'HR@5':>6} | {'MRR':>6} | {'P@5':>6} | {'NDCG':>6}")
+    print("-" * 75)
+    
+    for strategy, metrics in agg.items():
         if not metrics:
             continue
-            
-        agg = {
-            "avg_tokens": float(np.mean([m["token_count"] for m in metrics])),
-            "avg_coherence": float(np.mean([m["coherence"] for m in metrics])),
-            "avg_hr@5": float(np.mean([m["hr@5"] for m in metrics])),
-            "avg_mrr": float(np.mean([m["mrr"] for m in metrics])),
-            "avg_precision@5": float(np.mean([m["precision@5"] for m in metrics])),
-            "avg_ndcg@5": float(np.mean([m["ndcg@5"] for m in metrics])),
-        }
-        final_results["aggregate_metrics"][strat] = agg
-        
-        print(f"{strat:20} | {agg['avg_tokens']:7.1f} | {agg['avg_coherence']:5.3f} | "
-              f"{agg['avg_hr@5']:5.2f} | {agg['avg_mrr']:5.2f} | {agg['avg_precision@5']:5.2f} | {agg['avg_ndcg@5']:5.2f}")
-
-    # Save
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    results_path = Path(__file__).parent / "results" / f"benchmark_{timestamp}.json"
-    results_path.parent.mkdir(exist_ok=True)
+        avg_tokens = np.mean([m["tokens"] for m in metrics])
+        avg_hr = np.mean([m["hr@5"] for m in metrics])
+        avg_mrr = np.mean([m["mrr"] for m in metrics])
+        avg_p = np.mean([m["precision@5"] for m in metrics])
+        avg_ndcg = np.mean([m["ndcg@5"] for m in metrics])
+        print(f"{strategy:20} | {avg_tokens:7.1f} | {avg_hr:6.2f} | {avg_mrr:6.2f} | {avg_p:6.2f} | {avg_ndcg:6.2f}")
     
-    with open(results_path, "w", encoding="utf-8") as f:
-        json.dump(final_results, f, indent=2, ensure_ascii=False)
-
-    print(f"\n⏱️ Total time: {time.time() - start_time:.2f}s")
-    print("=" * 90)
+    # Save
+    results_dir = Path(__file__).parent / "results"
+    results_dir.mkdir(exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    with open(results_dir / f"benchmark_{timestamp}.json", "w") as f:
+        json.dump({"config": vars(args), "results": all_results, "aggregate": {k: [dict(m) for m in v] for k, v in agg.items()}}, f, indent=2)
+    
+    print(f"\n⏱️ Total: {time.time() - start:.1f}s")
 
 
 if __name__ == "__main__":
