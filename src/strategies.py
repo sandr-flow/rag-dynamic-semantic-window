@@ -136,11 +136,6 @@ class DynamicSemanticStrategy(BaseStrategy):
         self,
         documents: list[Document],
         top_k: int = DEFAULT_RETRIEVAL_CONFIG.top_k,
-        threshold: float = DEFAULT_EXPANSION_CONFIG.threshold,
-        max_expand: int = DEFAULT_EXPANSION_CONFIG.max_expand,
-        min_window: int = DEFAULT_EXPANSION_CONFIG.min_window,
-        relevance_threshold_pct: float = DEFAULT_EXPANSION_CONFIG.relevance_threshold_pct,
-        merge_gap: int = DEFAULT_EXPANSION_CONFIG.merge_gap,
         seed_rejection_log_path: str | None = None,
         phantom_window: int = DEFAULT_DYNAMIC_SEMANTIC_CONFIG.phantom_window,
         prefetch_multiplier: int = DEFAULT_DYNAMIC_SEMANTIC_CONFIG.prefetch_multiplier,
@@ -148,23 +143,16 @@ class DynamicSemanticStrategy(BaseStrategy):
         """
         Initialize dynamic semantic strategy.
 
+        All expansion parameters (threshold, skip_threshold, max_expand, etc.)
+        are taken from DEFAULT_EXPANSION_CONFIG in config.py.
+
         Args:
             documents: List of documents to index.
             top_k: Number of results to retrieve.
-            threshold: Cosine similarity threshold for expansion beyond min_window.
-            max_expand: Maximum sentences to expand in each direction.
-            min_window: Minimum neighbors to always include (hybrid safety net).
-            relevance_threshold_pct: Query relevance threshold as % of max score (0.85 = 85%).
-            merge_gap: Maximum gap between clusters to merge (2 = merge if <= 2 sentences apart).
             seed_rejection_log_path: Path to log rejected seeds (JSONL format).
             phantom_window: Number of neighbors to include in embedding context (0 = disabled).
             prefetch_multiplier: Multiplier for first-pass retrieval (4 = fetch top_k*4 seeds).
         """
-        self.threshold = threshold
-        self.max_expand = max_expand
-        self.min_window = min_window
-        self.relevance_threshold_pct = relevance_threshold_pct
-        self.merge_gap = merge_gap
         self.seed_rejection_log_path = seed_rejection_log_path
         self.phantom_window = phantom_window
         self.prefetch_multiplier = prefetch_multiplier
@@ -222,16 +210,11 @@ class DynamicSemanticStrategy(BaseStrategy):
         retriever = VectorIndexRetriever(index=self.index, similarity_top_k=prefetch_k)
         nodes = retriever.retrieve(query)
 
-        # Apply dynamic expansion with hybrid window + Query-Aware + Multi-Seed Merging
+        # Apply dynamic expansion - uses defaults from config.py
         expander = DynamicSemanticExpander(
             docstore=self.docstore,
-            threshold=self.threshold,
-            max_expand=self.max_expand,
-            min_window=self.min_window,
-            relevance_threshold_pct=self.relevance_threshold_pct,
-            merge_gap=self.merge_gap,
             seed_rejection_log_path=self.seed_rejection_log_path,
-            target_clusters=self.top_k,  # Pass target for deduplication
+            target_clusters=self.top_k,
         )
         return expander.postprocess_nodes(nodes, QueryBundle(query_str=query))
 

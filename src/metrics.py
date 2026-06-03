@@ -168,3 +168,65 @@ def compute_all_metrics(
         f"recall@{k}": recall_at_k(retrieved_texts, answer_sentence, k),
         f"ndcg@{k}": ndcg_at_k(retrieved_texts, answer_sentence, k),
     }
+
+
+def recall_at_k_ids(
+    retrieved_ids: list[str], relevant_ids: list[str], k: Optional[int] = None
+) -> float:
+    """
+    Calculate Recall@K for ID-based retrieval.
+    
+    Args:
+        retrieved_ids: List of retrieved document IDs (ranked).
+        relevant_ids: List of relevant document IDs (ground truth).
+        k: Cutoff rank.
+        
+    Returns:
+        Recall score (fraction of relevant docs found).
+    """
+    if not relevant_ids:
+        return 0.0
+        
+    if k is None:
+        k = len(retrieved_ids)
+        
+    top_k = set(retrieved_ids[:k])
+    relevant_set = set(relevant_ids)
+    
+    hits = top_k.intersection(relevant_set)
+    return len(hits) / len(relevant_set)
+
+
+def ndcg_at_k_ids(
+    retrieved_ids: list[str], relevant_ids: list[str], k: Optional[int] = None
+) -> float:
+    """
+    Calculate NDCG@K for ID-based retrieval (binary relevance).
+    
+    Args:
+        retrieved_ids: List of retrieved document IDs (ranked).
+        relevant_ids: List of relevant document IDs.
+        k: Cutoff rank.
+        
+    Returns:
+        NDCG score.
+    """
+    if not relevant_ids:
+        return 0.0
+        
+    if k is None:
+        k = len(retrieved_ids)
+        
+    top_k = retrieved_ids[:k]
+    relevant_set = set(relevant_ids)
+    
+    dcg = 0.0
+    for i, doc_id in enumerate(top_k):
+        if doc_id in relevant_set:
+            dcg += 1.0 / math.log2(i + 2)
+            
+    idcg = 0.0
+    for i in range(min(len(relevant_set), k)):
+        idcg += 1.0 / math.log2(i + 2)
+        
+    return dcg / idcg if idcg > 0 else 0.0

@@ -64,6 +64,7 @@ def fetch_qasper_articles(
     count: int,
     min_length: int = 2000,
     split: str = "validation",
+    skip: int = 0,
 ) -> list[tuple[str, str]]:
     """
     Fetch articles from QASPER dataset.
@@ -72,12 +73,14 @@ def fetch_qasper_articles(
         count: Number of articles to fetch.
         min_length: Minimum article length in characters.
         split: Dataset split to use.
+        skip: Number of valid articles to skip (for non-overlapping sets).
 
     Returns:
         List of (title, text) tuples.
     """
     papers = load_qasper_dataset(split)
     articles = []
+    skipped = 0
 
     for paper in papers:
         if len(articles) >= count:
@@ -88,6 +91,11 @@ def fetch_qasper_articles(
 
         # Filter by length
         if len(text) < min_length:
+            continue
+
+        # Skip first N valid articles
+        if skipped < skip:
+            skipped += 1
             continue
 
         articles.append((title, text))

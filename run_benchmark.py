@@ -30,7 +30,11 @@ load_dotenv()
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="Benchmark retrieval strategies")
-    parser.add_argument("--source", choices=["static", "wikipedia", "qasper"], default="static")
+    parser.add_argument(
+        "--source", 
+        choices=["static", "wikipedia", "qasper"],
+        default="static"
+    )
     parser.add_argument(
         "--num-questions", 
         type=int, 
@@ -47,6 +51,18 @@ def parse_args():
         type=int, 
         default=DEFAULT_BENCHMARK_CONFIG.default_min_article_length,
     )
+    parser.add_argument(
+        "--skip",
+        type=int,
+        default=0,
+        help="Number of articles to skip (for non-overlapping validation sets)",
+    )
+    parser.add_argument(
+        "--split",
+        choices=["train", "validation", "test"],
+        default="train",
+        help="QASPER dataset split (train has ~1500 articles)",
+    )
     return parser.parse_args()
 
 
@@ -55,15 +71,13 @@ def count_tokens(text: str) -> int:
     return len(text) // 4
 
 
-def benchmark_article(text: str, qa_pairs: list[dict], title: str) -> dict:
+def benchmark_article(text: str, qa_pairs: list[dict], title: str, save_full_text: bool = True) -> dict:
     """
     Benchmark all strategies on a single article.
     
     Returns dict with metrics per strategy.
     """
     documents = [Document(text=text)]
-    threshold = float(os.getenv("SIMILARITY_THRESHOLD", "0.6"))
-    max_expand = int(os.getenv("MAX_EXPAND", "5"))
     
     # Seed rejection log path
     results_dir = Path(__file__).parent / "results"
@@ -80,8 +94,6 @@ def benchmark_article(text: str, qa_pairs: list[dict], title: str) -> dict:
         DynamicSemanticStrategy(
             documents,
             top_k=top_k,
-            threshold=threshold,
-            max_expand=max_expand,
             seed_rejection_log_path=seed_log_path,
         ),
     ]
@@ -124,6 +136,9 @@ def benchmark_article(text: str, qa_pairs: list[dict], title: str) -> dict:
             failure_log = {
                 "article_title": title,
                 "article_url": f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}",
+                "full_text": text if save_full_text else None,  # Full article for Optuna corpus
+                "all_qa_pairs": qa_pairs if save_full_text else None,  # All QA pairs for corpus
+                "failed_question_index": qa_pairs.index(qa),  # Which question failed
                 "question": question,
                 "expected_answer": answer,
                 "strategies": {
@@ -146,7 +161,7 @@ def benchmark_article(text: str, qa_pairs: list[dict], title: str) -> dict:
 async def fetch_wikipedia_articles(count: int, specific_title: str = None, min_length: int = 2000):
     """Fetch Wikipedia articles."""
     from src.wikipedia_loader import fetch_article_by_title, fetch_random_articles_batch
-    
+
     if specific_title:
         title, text = fetch_article_by_title(specific_title)
         return [(title, text)]
@@ -190,27 +205,33 @@ def run_benchmark():
     
     start = time.time()
     
+    all_results = []
+    
     # Get articles + QA pairs
+    data = []
     if args.source == "wikipedia":
         print(f"\n📥 Fetching {args.num_articles} Wikipedia articles (min length: {args.min_length})...")
         articles = asyncio.run(fetch_wikipedia_articles(args.num_articles, args.article, args.min_length))
         print(f"✅ Fetched {len(articles)} articles")
-        
+
         print(f"\n📝 Generating QA pairs...")
         data = asyncio.run(generate_qa_pairs(articles, args.num_questions))
         data = [d for d in data if d["qa_pairs"]]  # Filter failed
         print(f"✅ Generated QA for {len(data)} articles")
+
     elif args.source == "qasper":
         from src.qasper_loader import fetch_qasper_articles
-        
-        print(f"\n📥 Loading {args.num_articles} QASPER articles (min length: {args.min_length})...")
-        articles = fetch_qasper_articles(args.num_articles, args.min_length)
+
+        skip_msg = f", skipping first {args.skip}" if args.skip > 0 else ""
+        print(f"\n📥 Loading {args.num_articles} QASPER articles (split: {args.split}, min length: {args.min_length}{skip_msg})...")
+        articles = fetch_qasper_articles(args.num_articles, args.min_length, split=args.split, skip=args.skip)
         print(f"✅ Loaded {len(articles)} articles")
-        
+
         print(f"\n📝 Generating QA pairs...")
         data = asyncio.run(generate_qa_pairs(articles, args.num_questions))
         data = [d for d in data if d["qa_pairs"]]  # Filter failed
         print(f"✅ Generated QA for {len(data)} articles")
+
     else:
         # Static mode
         text_path = Path(__file__).parent / "data" / "source_text.txt"
@@ -224,15 +245,13 @@ def run_benchmark():
                 {"question": "What is the Heisenberg uncertainty principle?", "answer_sentence": "The Heisenberg uncertainty principle states that one cannot simultaneously know both the exact position and momentum of a particle."},
             ]
         }]
-    
+
     # Run benchmarks
     print(f"\n🔬 Benchmarking {len(data)} articles...")
-    all_results = []
     for item in data:
         print(f"  → {item['title']}")
         result = benchmark_article(item["text"], item["qa_pairs"], item["title"])
         all_results.append(result)
-    
     # Aggregate
     agg = {}
     for result in all_results:
@@ -243,20 +262,37 @@ def run_benchmark():
     
     # Print results
     total_q = sum(r["num_questions"] for r in all_results)
-    print(f"\n📊 RESULTS ({len(all_results)} articles, {total_q} questions)")
-    print("-" * 75)
-    print(f"{'Strategy':20} | {'Tokens':>7} | {'HR@5':>6} | {'MRR':>6} | {'P@5':>6} | {'NDCG':>6}")
-    print("-" * 75)
+    print(f"\n📊 RESULTS ({len(all_results)} datasets/articles, {total_q} questions)")
     
-    for strategy, metrics in agg.items():
-        if not metrics:
-            continue
-        avg_tokens = np.mean([m["tokens"] for m in metrics])
-        avg_hr = np.mean([m["hr@5"] for m in metrics])
-        avg_mrr = np.mean([m["mrr"] for m in metrics])
-        avg_p = np.mean([m["precision@5"] for m in metrics])
-        avg_ndcg = np.mean([m["ndcg@5"] for m in metrics])
-        print(f"{strategy:20} | {avg_tokens:7.1f} | {avg_hr:6.2f} | {avg_mrr:6.2f} | {avg_p:6.2f} | {avg_ndcg:6.2f}")
+    # Determine columns based on first available metrics
+    first_strategy = next(iter(agg)) if agg else None
+    if first_strategy and agg[first_strategy]:
+        sample_metrics = agg[first_strategy][0]
+        has_recall = "recall@2" in sample_metrics
+        
+        print("-" * 85)
+        if has_recall:
+             print(f"{'Strategy':20} | {'Tokens':>7} | {'R@2':>6} | {'R@5':>6} | {'NDCG@5':>7}")
+        else:
+            print(f"{'Strategy':20} | {'Tokens':>7} | {'HR@5':>6} | {'MRR':>6} | {'P@5':>6} | {'NDCG@5':>6}")
+        print("-" * 85)
+        
+        for strategy, metrics in agg.items():
+            if not metrics:
+                continue
+            avg_tokens = np.mean([m["tokens"] for m in metrics])
+            
+            if has_recall:
+                avg_r2 = np.mean([m["recall@2"] for m in metrics])
+                avg_r5 = np.mean([m["recall@5"] for m in metrics])
+                avg_ndcg = np.mean([m["ndcg@5"] for m in metrics])
+                print(f"{strategy:20} | {avg_tokens:7.1f} | {avg_r2:6.4f} | {avg_r5:6.4f} | {avg_ndcg:7.4f}")
+            else:
+                avg_hr = np.mean([m["hr@5"] for m in metrics])
+                avg_mrr = np.mean([m["mrr"] for m in metrics])
+                avg_p = np.mean([m["precision@5"] for m in metrics])
+                avg_ndcg = np.mean([m["ndcg@5"] for m in metrics])
+                print(f"{strategy:20} | {avg_tokens:7.1f} | {avg_hr:6.4f} | {avg_mrr:6.4f} | {avg_p:6.4f} | {avg_ndcg:6.4f}")
     
     # Save
     results_dir = Path(__file__).parent / "results"
@@ -270,3 +306,4 @@ def run_benchmark():
 
 if __name__ == "__main__":
     run_benchmark()
+

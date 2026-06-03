@@ -792,7 +792,8 @@ class DynamicSemanticExpander(BaseNodePostprocessor):
                 )
                 merged.append(NodeWithScore(node=new_node, score=best_score))
 
-        # BACKFILL: If merge reduced count below target_k, find additional seeds
+        # BACKFILL: Guarantee target_k clusters by iteratively finding more seeds
+        # First try cached candidates, then fetch more from docstore if needed
         if len(merged) < target_k and query_embedding is not None:
             # Collect all positions already in merged clusters
             used_positions = set()
@@ -805,23 +806,85 @@ class DynamicSemanticExpander(BaseNodePostprocessor):
                     except (ValueError, IndexError):
                         pass
 
-            # Find candidates from cache that aren't in any cluster
+            # Phase 1: Try candidates from cache first
             candidates = []
             for node_id, emb in self._embedding_cache.items():
                 try:
                     pos = int(node_id.split("_")[-1])
                     if pos not in used_positions:
-                        # Compute similarity to query
                         sim = dot_similarity(query_embedding, emb)
-                        candidates.append((node_id, pos, sim))
+                        candidates.append((node_id, pos, sim, emb))
                 except (ValueError, IndexError):
                     pass
 
             # Sort by query similarity (descending)
             candidates.sort(key=lambda x: x[2], reverse=True)
 
+            # Phase 2: If not enough candidates in cache, scan docstore
+            # Find max position to know docstore bounds
+            max_cached_pos = 0
+            for node_id in self._node_cache.keys():
+                try:
+                    pos = int(node_id.split("_")[-1])
+                    max_cached_pos = max(max_cached_pos, pos)
+                except (ValueError, IndexError):
+                    pass
+
+            # Estimate total sentences (scan docstore for more)
+            scan_pos = 0
+            scanned_candidates = []
+            while len(merged) + len(candidates) + len(scanned_candidates) < target_k * 3:
+                node_id = f"doc_sent_{scan_pos:04d}"
+                scan_pos += 1
+                
+                # Stop if we've gone too far without finding nodes
+                if scan_pos > max_cached_pos + 1000:
+                    break
+                
+                # Skip already used positions
+                if (scan_pos - 1) in used_positions:
+                    continue
+                
+                # Skip if already in candidates
+                if any(c[1] == (scan_pos - 1) for c in candidates):
+                    continue
+                
+                # Try to get from cache first
+                node = self._get_cached_node(node_id)
+                emb = self._get_cached_embedding(node_id)
+                
+                # If not cached, try docstore
+                if node is None:
+                    try:
+                        node = self.docstore.get_node(node_id)
+                    except Exception:
+                        continue
+                
+                if node is None:
+                    continue
+                
+                # Compute embedding if not cached
+                if emb is None and node.embedding is not None:
+                    emb = np.array(node.embedding, dtype=np.float32)
+                    norm = np.linalg.norm(emb)
+                    if norm > 0:
+                        emb = emb / norm
+                    # Cache for reuse
+                    self._node_cache[node_id] = node
+                    self._embedding_cache[node_id] = emb
+                
+                if emb is None:
+                    continue
+                
+                sim = dot_similarity(query_embedding, emb)
+                scanned_candidates.append((node_id, scan_pos - 1, sim, emb))
+
+            # Combine and sort all candidates
+            all_candidates = candidates + scanned_candidates
+            all_candidates.sort(key=lambda x: x[2], reverse=True)
+
             # Expand top candidates until we reach target_k
-            for node_id, pos, sim in candidates:
+            for node_id, pos, sim, emb in all_candidates:
                 if len(merged) >= target_k:
                     break
 
@@ -830,6 +893,12 @@ class DynamicSemanticExpander(BaseNodePostprocessor):
                     continue
 
                 seed_node = self._get_cached_node(node_id)
+                if not seed_node:
+                    try:
+                        seed_node = self.docstore.get_node(node_id)
+                    except Exception:
+                        continue
+                
                 if not seed_node:
                     continue
 
@@ -866,4 +935,5 @@ class DynamicSemanticExpander(BaseNodePostprocessor):
                 )
                 merged.append(NodeWithScore(node=new_node, score=sim))
 
-        return merged
+        # Final truncation to guarantee exactly target_k clusters
+        return merged[:target_k]

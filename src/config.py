@@ -8,24 +8,30 @@ class ExpansionConfig:
     """Configuration for semantic expansion algorithm.
     
     Controls how the DynamicSemanticExpander expands context around seed nodes.
+    Values optimized via Optuna dual_constraint_v1 on QASPER dataset (trial #197).
+    Constraints: tokens <= 1300, HR >= 0.85
+    
+    Previous configs:
+        hr_max_1000tokens: threshold=0.787, skip=0.957, relevance=0.968
+        Wikipedia balanced_v3: threshold=0.939, skip=0.936, relevance=0.698
     """
     
-    # Core expansion thresholds
-    threshold: float = 0.85
+    # Core expansion thresholds (failures_hr_max optimized, trial #219)
+    threshold: float = 0.96
     """Minimum cosine similarity for expansion beyond min_window."""
     
-    skip_threshold: float = 0.85
+    skip_threshold: float = 0.827
     """Threshold for sentence skipping (bridging low-similarity gaps)."""
     
-    relevance_threshold_pct: float = 0.70
-    """Query relevance threshold as percentage of max seed score (0.70 = 70%)."""
+    relevance_threshold_pct: float = 0.684
+    """Query relevance threshold as percentage of max seed score."""
     
     # Window size limits
-    max_expand: int = 7
+    max_expand: int = 4
     """Maximum sentences to expand in each direction from seed."""
     
-    min_window: int = 3
-    """Minimum neighbors to always include (hybrid safety net)."""
+    min_window: int = 1
+    """Minimum neighbors to always include."""
     
     min_chunk_length: int = 20
     """Minimum character length for valid chunks (filters garbage)."""
@@ -35,7 +41,7 @@ class ExpansionConfig:
     """Target number of clusters for deduplication and backfill."""
     
     merge_gap: int = 2
-    """Maximum gap between clusters to merge (2 = merge if <= 2 sentences apart)."""
+    """Maximum gap between clusters to merge."""
 
 
 @dataclass
@@ -108,10 +114,10 @@ class SeedValidationConfig:
 class NaiveChunkingConfig:
     """Configuration for Naive Chunking strategy (baseline)."""
     
-    chunk_size: int = 128
-    """Target chunk size in tokens."""
+    chunk_size: int = 256
+    """Target chunk size in tokens (doubled for fairer comparison)."""
     
-    chunk_overlap: int = 20
+    chunk_overlap: int = 40
     """Overlap between consecutive chunks."""
 
 
@@ -189,6 +195,65 @@ class DynamicSemanticExpanderConfig:
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
 
 
+@dataclass
+class CorpusConfig:
+    """Configuration for corpus preparation."""
+    
+    num_articles: int = 100
+    """Number of Wikipedia articles to fetch."""
+    
+    min_article_length: int = 10000
+    """Minimum article length in characters."""
+    
+    questions_per_article: int = 3
+    """Number of QA pairs to generate per article."""
+    
+    top_k_candidates: int = 100
+    """Number of top candidates to pre-compute per question."""
+    
+    corpus_cache_path: str = "data/cached_corpus.pkl"
+    """Path to save binary corpus cache (embeddings + matrices)."""
+    
+    articles_jsonl_path: str = "data/articles.jsonl"
+    """Path to save raw article texts (human-readable)."""
+    
+    questions_jsonl_path: str = "data/questions.jsonl"
+    """Path to save generated QA pairs (human-readable)."""
+
+
+@dataclass
+class OptunaConfig:
+    """Configuration for Optuna hyperparameter search."""
+    
+    n_trials: int = 200
+    """Number of Optuna trials to run."""
+    
+    study_name: str = "dynamic_semantic_hpo"
+    """Name of the Optuna study."""
+    
+    storage: str | None = None
+    """SQLite storage path for persistence (None = in-memory)."""
+    
+    # Token minimization with quality constraints
+    # Baseline from orig_minwin1: HR=0.9251, MRR=0.7594, tokens=1083
+    baseline_hr: float = 0.9251
+    """Baseline HR - if below, huge penalty."""
+    
+    baseline_mrr: float = 0.7594
+    """Baseline MRR - if below, huge penalty."""
+    
+    constraint_violation_penalty: float = 1000.0
+    """Massive penalty for violating HR/MRR constraints."""
+    
+    # Hyperparameter search ranges
+    threshold_range: tuple[float, float] = (0.5, 0.99)
+    skip_threshold_range: tuple[float, float] = (0.5, 0.99)
+    min_window_range: tuple[int, int] = (1, 5)
+    max_expand_range: tuple[int, int] = (3, 10)
+    relevance_threshold_pct_range: tuple[float, float] = (0.5, 0.99)
+    merge_gap_range: tuple[int, int] = (1, 5)
+
+
 # Default configurations
 DEFAULT_EXPANSION_CONFIG = ExpansionConfig()
 DEFAULT_ADAPTIVE_THRESHOLD_CONFIG = AdaptiveThresholdConfig()
@@ -199,3 +264,5 @@ DEFAULT_SEMANTIC_SPLITTER_CONFIG = SemanticSplitterConfig()
 DEFAULT_DYNAMIC_SEMANTIC_CONFIG = DynamicSemanticConfig()
 DEFAULT_RETRIEVAL_CONFIG = RetrievalConfig()
 DEFAULT_BENCHMARK_CONFIG = BenchmarkConfig()
+DEFAULT_CORPUS_CONFIG = CorpusConfig()
+DEFAULT_OPTUNA_CONFIG = OptunaConfig()
