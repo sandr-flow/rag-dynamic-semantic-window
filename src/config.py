@@ -147,6 +147,77 @@ class SemanticSplitterConfig:
 
 
 @dataclass
+class TokenTextSplitterConfig:
+    """Configuration for token-based splitter strategy."""
+
+    chunk_size: int = 256
+    """Target chunk size in tokens."""
+
+    chunk_overlap: int = 40
+    """Overlap between consecutive token chunks."""
+
+
+@dataclass
+class MarkdownSplitterConfig:
+    """Configuration for MarkdownNodeParser strategy."""
+
+    header_path_separator: str = "/"
+    """Separator used for markdown header path metadata."""
+
+
+@dataclass
+class HTMLSplitterConfig:
+    """Configuration for HTMLNodeParser strategy."""
+
+    tags: tuple[str, ...] = (
+        "p",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "li",
+        "b",
+        "i",
+        "u",
+        "section",
+    )
+    """HTML tags to extract as nodes."""
+
+
+@dataclass
+class JSONSplitterConfig:
+    """Configuration for JSONNodeParser strategy."""
+
+    include_metadata: bool = True
+    """Include parser metadata in nodes."""
+
+
+@dataclass
+class CodeSplitterConfig:
+    """Configuration for CodeSplitter strategy."""
+
+    language: str = "python"
+    """Programming language grammar to use."""
+
+    chunk_lines: int = 40
+    """Target number of code lines per chunk."""
+
+    chunk_lines_overlap: int = 15
+    """Line overlap between chunks."""
+
+    max_chars: int = 1500
+    """Maximum characters per chunk."""
+
+    count_mode: str = "char"
+    """Counting mode: char or token."""
+
+    max_tokens: int = 512
+    """Maximum tokens when count_mode is token."""
+
+
+@dataclass
 class DynamicSemanticConfig:
     """Configuration for Dynamic Semantic strategy (experiment)."""
     
@@ -166,11 +237,54 @@ class RetrievalConfig:
 
 
 @dataclass
+class EmbeddingProviderConfig:
+    """Embedding provider selection."""
+
+    provider: str = "huggingface"
+    """Provider id: mock, huggingface, mistral, openai, ollama, or custom."""
+
+    model: str = "BAAI/bge-small-en-v1.5"
+    """Embedding model name."""
+
+    api_key_env: str | None = None
+    """Environment variable containing API key."""
+
+    api_key: str | None = None
+    """Direct API key override, mainly for programmatic compatibility."""
+
+    base_url: str | None = None
+    """Optional provider base URL."""
+
+
+@dataclass
+class LLMProviderConfig:
+    """Chat provider selection for QA generation."""
+
+    provider: str = "mistral"
+    """Provider id: mistral, openai, openrouter, ollama, or custom."""
+
+    model: str = "mistral-small-latest"
+    """Chat model name."""
+
+    api_key_env: str | None = None
+    """Environment variable containing API key."""
+
+    api_key: str | None = None
+    """Direct API key override, mainly for programmatic compatibility."""
+
+    base_url: str | None = None
+    """OpenAI-compatible base URL or Ollama endpoint."""
+
+
+@dataclass
 class BenchmarkConfig:
     """Configuration for benchmark execution."""
     
+    qa_generation_delay: float = 1.1
+    """Delay between QA-generation LLM calls (seconds)."""
+
     mistral_rps_delay: float = 1.1
-    """Delay between Mistral API calls (seconds) to respect 1 RPS limit."""
+    """Backward-compatible alias for older benchmark scripts."""
     
     default_min_article_length: int = 2000
     """Minimum article length in characters."""
@@ -261,8 +375,15 @@ DEFAULT_SEED_VALIDATION_CONFIG = SeedValidationConfig()
 DEFAULT_NAIVE_CHUNKING_CONFIG = NaiveChunkingConfig()
 DEFAULT_FIXED_WINDOW_CONFIG = FixedWindowConfig()
 DEFAULT_SEMANTIC_SPLITTER_CONFIG = SemanticSplitterConfig()
+DEFAULT_TOKEN_TEXT_SPLITTER_CONFIG = TokenTextSplitterConfig()
+DEFAULT_MARKDOWN_SPLITTER_CONFIG = MarkdownSplitterConfig()
+DEFAULT_HTML_SPLITTER_CONFIG = HTMLSplitterConfig()
+DEFAULT_JSON_SPLITTER_CONFIG = JSONSplitterConfig()
+DEFAULT_CODE_SPLITTER_CONFIG = CodeSplitterConfig()
 DEFAULT_DYNAMIC_SEMANTIC_CONFIG = DynamicSemanticConfig()
 DEFAULT_RETRIEVAL_CONFIG = RetrievalConfig()
+DEFAULT_EMBEDDING_PROVIDER_CONFIG = EmbeddingProviderConfig()
+DEFAULT_LLM_PROVIDER_CONFIG = LLMProviderConfig()
 DEFAULT_BENCHMARK_CONFIG = BenchmarkConfig()
 DEFAULT_CORPUS_CONFIG = CorpusConfig()
 DEFAULT_OPTUNA_CONFIG = OptunaConfig()

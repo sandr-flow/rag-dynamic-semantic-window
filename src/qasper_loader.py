@@ -49,7 +49,7 @@ def extract_full_text(paper: dict) -> str:
         section_names = full_text.get("section_name", []) or []
         paragraphs_list = full_text.get("paragraphs", []) or []
 
-        for section_name, paragraphs in zip(section_names, paragraphs_list):
+        for section_name, paragraphs in zip(section_names, paragraphs_list, strict=False):
             if section_name:
                 parts.append(f"\n{section_name}\n")
             if paragraphs:
@@ -99,6 +99,6 @@ def fetch_qasper_articles(
             continue
 
         articles.append((title, text))
-        print(f"  📄 [{len(articles)}/{count}] Loaded: {title[:50]}... ({len(text)} chars)")
+        print(f"  [INFO] [{len(articles)}/{count}] Loaded: {title[:50]}... ({len(text)} chars)")
 
     return articles

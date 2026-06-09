@@ -18,7 +18,7 @@ def analyze_failures():
     
     for failure_file in failures_dir.glob("*.json"):
         try:
-            with open(failure_file, "r", encoding="utf-8") as f:
+            with open(failure_file, encoding="utf-8") as f:
                 data = json.load(f)
             
             total_failures += 1
@@ -36,7 +36,7 @@ def analyze_failures():
         except Exception as e:
             print(f"Error reading {failure_file.name}: {e}")
     
-    print(f"\n📊 Failure Analysis")
+    print("\n📊 Failure Analysis")
     print("=" * 40)
     print(f"Total failures: {total_failures}")
     print(f"Dynamic Semantic with < 5 chunks: {insufficient_chunks}")

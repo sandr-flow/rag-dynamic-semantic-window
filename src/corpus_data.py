@@ -69,6 +69,9 @@ class CorpusData:
     questions: list[QuestionData] = field(default_factory=list)
     embed_dim: int = 384  # Default for bge-small-en-v1.5
     top_k: int = 100
+    source: str = "unknown"
+    embedding_provider: str = "unknown"
+    embedding_model: str = "unknown"
 
 
 def find_answer_sentence_idx(sentences: list[str], answer: str) -> int:

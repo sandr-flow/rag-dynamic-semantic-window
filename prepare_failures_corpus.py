@@ -58,7 +58,7 @@ def load_failures() -> list[dict]:
     
     for failure_file in failures_dir.glob("*.json"):
         try:
-            with open(failure_file, "r", encoding="utf-8") as f:
+            with open(failure_file, encoding="utf-8") as f:
                 data = json.load(f)
             
             full_text = data.get("full_text")

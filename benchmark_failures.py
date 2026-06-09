@@ -9,20 +9,20 @@ from llama_index.core import Settings
 from llama_index.core.schema import Document
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 
-load_dotenv()
-
-# Load embedding model
-model_name = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
-print(f"Loading: {model_name}")
-Settings.embed_model = HuggingFaceEmbedding(model_name=model_name)
-
+from src.metrics import compute_all_metrics
 from src.strategies import (
     DynamicSemanticStrategy,
     FixedWindowStrategy,
     NaiveChunkingStrategy,
     SemanticSplitterStrategy,
 )
-from src.metrics import compute_all_metrics
+
+load_dotenv()
+
+# Load embedding model
+model_name = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
+print(f"Loading: {model_name}")
+Settings.embed_model = HuggingFaceEmbedding(model_name=model_name)
 
 
 def count_tokens(text: str) -> int:
@@ -38,7 +38,7 @@ def load_failures() -> list[dict]:
     
     for failure_file in failures_dir.glob("*.json"):
         try:
-            with open(failure_file, "r", encoding="utf-8") as f:
+            with open(failure_file, encoding="utf-8") as f:
                 data = json.load(f)
             
             full_text = data.get("full_text")
@@ -99,7 +99,7 @@ def main():
         "Dynamic Semantic": {"hr": [], "mrr": [], "tokens": [], "num_chunks": []},
     }
     
-    for i, (key, article) in enumerate(articles.items()):
+    for i, (_key, article) in enumerate(articles.items()):
         print(f"  [{i+1}/{len(articles)}] {article['title'][:50]}... ({len(article['questions'])} q)")
         
         documents = [Document(text=article["text"])]

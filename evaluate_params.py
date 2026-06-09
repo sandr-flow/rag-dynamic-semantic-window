@@ -9,7 +9,6 @@ from pathlib import Path
 from src.cached_expander import CachedDynamicExpander, evaluate_retrieval
 from src.corpus_data import CorpusData
 
-
 # Parameter sets to evaluate
 PARAMS_TO_TEST = {
     "original": {

@@ -1,29 +1,42 @@
 """LLM-based question generator for benchmark testing."""
 
-import json
 import os
-from typing import Optional
 
-import httpx
 from dotenv import load_dotenv
 
+from src.config import LLMProviderConfig
+from src.providers import (
+    chat_completion_json,
+    chat_completion_json_async,
+    llm_config_from_env,
+)
+
 load_dotenv()
+
+
+def _provider_config(api_key: str | None = None) -> LLMProviderConfig:
+    config = llm_config_from_env()
+    if api_key:
+        config.api_key = api_key
+        if not config.api_key_env:
+            config.api_key_env = "MISTRAL_API_KEY"
+    return config
 
 
 def generate_questions(
     text: str,
     num_questions: int = 10,
-    api_key: Optional[str] = None,
+    api_key: str | None = None,
 ) -> list[str]:
     """
-    Generate benchmark questions using Mistral API with JSON mode.
+    Generate benchmark questions using the configured OpenAI-compatible chat provider.
 
     Sends article text once, receives JSON array of questions.
 
     Args:
         text: Source text to generate questions about.
         num_questions: Number of questions to generate.
-        api_key: Mistral API key (defaults to MISTRAL_API_KEY env var).
+        api_key: Optional direct API key override.
 
     Returns:
         List of generated questions.
@@ -32,11 +45,11 @@ def generate_questions(
         ValueError: If API key not provided.
         httpx.HTTPError: If API request fails.
     """
-    api_key = api_key or os.getenv("MISTRAL_API_KEY")
-    if not api_key:
-        raise ValueError("MISTRAL_API_KEY not set")
+    config = _provider_config(api_key)
+    if not config.api_key and config.api_key_env and not os.getenv(config.api_key_env):
+        raise ValueError(f"{config.api_key_env} not set")
 
-    # Truncate text if too long (Mistral context limit)
+    # Keep prompts bounded for hosted models with moderate context windows.
     max_chars = 30000
     if len(text) > max_chars:
         text = text[:max_chars] + "..."
@@ -55,43 +68,24 @@ Article:
 Return ONLY a JSON object with this exact format:
 {{"questions": ["question 1", "question 2", ...]}}"""
 
-    response = httpx.post(
-        "https://api.mistral.ai/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": "mistral-small-latest",
-            "messages": [{"role": "user", "content": prompt}],
-            "response_format": {"type": "json_object"},
-            "temperature": 0.7,
-        },
-        timeout=60.0,
-    )
-    response.raise_for_status()
-
-    result = response.json()
-    content = result["choices"][0]["message"]["content"]
-    parsed = json.loads(content)
-
+    parsed = chat_completion_json(prompt, config=config, temperature=0.7, timeout=60.0)
     return parsed.get("questions", [])[:num_questions]
 
 
 def generate_qa_pairs(
     text: str,
     num_questions: int = 10,
-    api_key: Optional[str] = None,
+    api_key: str | None = None,
 ) -> list[dict]:
     """
-    Generate question-answer pairs using Mistral API with JSON mode.
+    Generate question-answer pairs using the configured OpenAI-compatible chat provider.
     Includes validation to ensure answers are extractive.
     """
-    api_key = api_key or os.getenv("MISTRAL_API_KEY")
-    if not api_key:
-        raise ValueError("MISTRAL_API_KEY not set")
+    config = _provider_config(api_key)
+    if not config.api_key and config.api_key_env and not os.getenv(config.api_key_env):
+        raise ValueError(f"{config.api_key_env} not set")
 
-    # Truncate text if too long (Mistral context limit)
+    # Keep prompts bounded for hosted models with moderate context windows.
     max_chars = 30000
     if len(text) > max_chars:
         text = text[:max_chars] + "..."
@@ -120,28 +114,18 @@ Return ONLY a JSON object with this exact format:
 
     while len(valid_pairs) < num_questions and retry_count < max_retries:
         if retry_count > 0:
-            print(f"  🔄 Retrying QA generation (attempt {retry_count + 1}, found {len(valid_pairs)}/{num_questions} valid)...")
+            print(
+                "  [INFO] Retrying QA generation "
+                f"(attempt {retry_count + 1}, found {len(valid_pairs)}/{num_questions} valid)..."
+            )
 
         try:
-            response = httpx.post(
-                "https://api.mistral.ai/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": "mistral-small-latest",
-                    "messages": [{"role": "user", "content": prompt}],
-                    "response_format": {"type": "json_object"},
-                    "temperature": 0.5 + (0.1 * retry_count),  # Slightly increase temperature on retry
-                },
+            parsed = chat_completion_json(
+                prompt,
+                config=config,
+                temperature=0.5 + (0.1 * retry_count),
                 timeout=90.0,
             )
-            response.raise_for_status()
-
-            result = response.json()
-            content = result["choices"][0]["message"]["content"]
-            parsed = json.loads(content)
             batch = parsed.get("qa_pairs", [])
 
             for pair in batch:
@@ -179,7 +163,7 @@ Return ONLY a JSON object with this exact format:
                 })
 
         except Exception as e:
-            print(f"  ⚠️ Error during QA generation retry: {e}")
+            print(f"  [WARN] Error during QA generation retry: {e}")
         
         retry_count += 1
 
@@ -189,14 +173,14 @@ Return ONLY a JSON object with this exact format:
 async def generate_qa_pairs_async(
     text: str,
     num_questions: int = 10,
-    api_key: Optional[str] = None,
+    api_key: str | None = None,
 ) -> list[dict]:
     """
     Async version of generate_qa_pairs for parallel batch processing.
     """
-    api_key = api_key or os.getenv("MISTRAL_API_KEY")
-    if not api_key:
-        raise ValueError("MISTRAL_API_KEY not set")
+    config = _provider_config(api_key)
+    if not config.api_key and config.api_key_env and not os.getenv(config.api_key_env):
+        raise ValueError(f"{config.api_key_env} not set")
 
     max_chars = 30000
     if len(text) > max_chars:
@@ -224,61 +208,48 @@ Return ONLY a JSON object with this exact format:
     max_retries = 3
     retry_count = 0
 
-    async with httpx.AsyncClient(timeout=90.0) as client:
-        while len(valid_pairs) < num_questions and retry_count < max_retries:
-            try:
-                response = await client.post(
-                    "https://api.mistral.ai/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": "mistral-small-latest",
-                        "messages": [{"role": "user", "content": prompt}],
-                        "response_format": {"type": "json_object"},
-                        "temperature": 0.5 + (0.1 * retry_count),
-                    },
-                )
-                response.raise_for_status()
+    while len(valid_pairs) < num_questions and retry_count < max_retries:
+        try:
+            parsed = await chat_completion_json_async(
+                prompt,
+                config=config,
+                temperature=0.5 + (0.1 * retry_count),
+                timeout=90.0,
+            )
+            batch = parsed.get("qa_pairs", [])
 
-                result = response.json()
-                content = result["choices"][0]["message"]["content"]
-                parsed = json.loads(content)
-                batch = parsed.get("qa_pairs", [])
+            for pair in batch:
+                if len(valid_pairs) >= num_questions:
+                    break
+                
+                q = pair.get("question", "")
+                a = pair.get("answer", "")
+                ans_sent = pair.get("answer_sentence", "")
 
-                for pair in batch:
-                    if len(valid_pairs) >= num_questions:
-                        break
-                    
-                    q = pair.get("question", "")
-                    a = pair.get("answer", "")
-                    ans_sent = pair.get("answer_sentence", "")
+                if not q or not a or not ans_sent:
+                    continue
 
-                    if not q or not a or not ans_sent:
+                if ans_sent not in text:
+                    clean_ans = ans_sent.strip(' \t\n\r"\'')
+                    if clean_ans not in text:
                         continue
+                    ans_sent = clean_ans
 
-                    if ans_sent not in text:
-                        clean_ans = ans_sent.strip(' \t\n\r"\'')
-                        if clean_ans not in text:
-                            continue
-                        ans_sent = clean_ans
+                if a.lower() not in ans_sent.lower():
+                    continue
+                
+                if any(v["question"] == q for v in valid_pairs):
+                    continue
 
-                    if a.lower() not in ans_sent.lower():
-                        continue
-                    
-                    if any(v["question"] == q for v in valid_pairs):
-                        continue
+                valid_pairs.append({
+                    "question": q,
+                    "answer": a,
+                    "answer_sentence": ans_sent
+                })
 
-                    valid_pairs.append({
-                        "question": q,
-                        "answer": a,
-                        "answer_sentence": ans_sent
-                    })
-
-            except Exception:
-                pass  # Squelch errors in async flow to allow retries
-            
-            retry_count += 1
+        except Exception:
+            pass  # Squelch errors in async flow to allow retries
+        
+        retry_count += 1
 
     return valid_pairs[:num_questions]

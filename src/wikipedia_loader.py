@@ -2,14 +2,12 @@
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional
 
 import httpx
 import wikipediaapi
 
-
 # Reusable Wikipedia client (created once)
-_wiki_client: Optional[wikipediaapi.Wikipedia] = None
+_wiki_client: wikipediaapi.Wikipedia | None = None
 
 
 def _get_wiki_client() -> wikipediaapi.Wikipedia:
@@ -52,11 +50,11 @@ def _fetch_random_titles(count: int = 10) -> list[str]:
         data = response.json()
         return [item["title"] for item in data["query"]["random"]]
     except Exception as e:
-        print(f"  ⚠️ Error fetching random titles: {e}")
+        print(f"  [WARN] Error fetching random titles: {e}")
         return []
 
 
-def _fetch_single_article(title: str, min_length: int = 2000) -> Optional[tuple[str, str]]:
+def _fetch_single_article(title: str, min_length: int = 2000) -> tuple[str, str] | None:
     """
     Fetch a single article by title (for use in thread pool).
 
@@ -73,7 +71,7 @@ def _fetch_single_article(title: str, min_length: int = 2000) -> Optional[tuple[
         if page.exists() and len(page.text) >= min_length:
             return page.title, page.text
     except Exception as e:
-        print(f"  ⚠️ Error fetching '{title}': {e}")
+        print(f"  [WARN] Error fetching '{title}': {e}")
     return None
 
 
@@ -127,7 +125,7 @@ async def fetch_random_articles_batch(
         for result in results:
             if result and len(articles) < count:
                 articles.append(result)
-                print(f"  📄 [{len(articles)}/{count}] Fetched: {result[0]} ({len(result[1])} chars)")
+                print(f"  [INFO] [{len(articles)}/{count}] Fetched: {result[0]} ({len(result[1])} chars)")
 
         attempts += 1
         
@@ -151,8 +149,6 @@ def fetch_random_article(min_length: int = 2000, max_retries: int = None) -> tup
     Returns:
         Tuple of (title, text).
     """
-    wiki = _get_wiki_client()
-
     while True:
         titles = _fetch_random_titles(5)
         for title in titles:

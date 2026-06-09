@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 from llama_index.core import Document, Settings
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 
-from src.config import DEFAULT_EXPANSION_CONFIG
+from src.config import DEFAULT_EXPANSION_CONFIG, DynamicSemanticConfig, ExpansionConfig
 from src.metrics import compute_all_metrics
 from src.strategies import DynamicSemanticStrategy
 from src.wikipedia_loader import fetch_random_articles_batch
@@ -93,14 +93,22 @@ def benchmark_with_params(
     
     Returns dict with metrics.
     """
+    expansion_config = ExpansionConfig(
+        threshold=params.get("threshold", DEFAULT_EXPANSION_CONFIG.threshold),
+        skip_threshold=params.get("skip_threshold", DEFAULT_EXPANSION_CONFIG.skip_threshold),
+        max_expand=params.get("max_expand", DEFAULT_EXPANSION_CONFIG.max_expand),
+        min_window=params.get("min_window", DEFAULT_EXPANSION_CONFIG.min_window),
+        relevance_threshold_pct=params.get(
+            "relevance_threshold_pct",
+            DEFAULT_EXPANSION_CONFIG.relevance_threshold_pct,
+        ),
+        merge_gap=params.get("merge_gap", DEFAULT_EXPANSION_CONFIG.merge_gap),
+    )
     strategy = DynamicSemanticStrategy(
         documents,
         top_k=5,
-        threshold=params.get("threshold", DEFAULT_EXPANSION_CONFIG.threshold),
-        max_expand=params.get("max_expand", DEFAULT_EXPANSION_CONFIG.max_expand),
-        min_window=params.get("min_window", DEFAULT_EXPANSION_CONFIG.min_window),
-        relevance_threshold_pct=params.get("relevance_threshold_pct", DEFAULT_EXPANSION_CONFIG.relevance_threshold_pct),
-        merge_gap=params.get("merge_gap", DEFAULT_EXPANSION_CONFIG.merge_gap),
+        dynamic_config=DynamicSemanticConfig(),
+        expansion_config=expansion_config,
     )
     
     results = []
@@ -197,7 +205,7 @@ async def main():
     print(f"   ✅ Total questions: {total_questions}")
     
     # Step 3: Run with ORIGINAL settings
-    print(f"\n🔵 Running with ORIGINAL settings...")
+    print("\n🔵 Running with ORIGINAL settings...")
     print(f"   threshold={ORIGINAL_PARAMS['threshold']}, min_window={ORIGINAL_PARAMS['min_window']}, max_expand={ORIGINAL_PARAMS['max_expand']}")
     
     v1_results = []
@@ -210,7 +218,7 @@ async def main():
         print(f"   ✓ {item['title'][:40]}...")
     
     # Step 4: Run with OPTUNA V2 settings
-    print(f"\n🟢 Running with OPTUNA V2 (HR-focused)...")
+    print("\n🟢 Running with OPTUNA V2 (HR-focused)...")
     print(f"   threshold={OPTUNA_V2_PARAMS['threshold']:.4f}, min_window={OPTUNA_V2_PARAMS['min_window']}, max_expand={OPTUNA_V2_PARAMS['max_expand']}")
     
     v2_results = []
@@ -235,7 +243,7 @@ async def main():
     with open(comparison_path, "w", encoding="utf-8") as f:
         json.dump({
             "config": vars(args),
-            "optuna_v1_params": OPTUNA_V1_PARAMS,
+            "original_params": ORIGINAL_PARAMS,
             "optuna_v2_params": OPTUNA_V2_PARAMS,
             "v1_results": v1_results,
             "v2_results": v2_results,

@@ -1,0 +1,31 @@
+name: provider_matrix_example
+
+benchmark:
+  enabled: true
+  source: custom
+  dataset_path: data/custom_benchmark.jsonl
+  top_k: 10
+  metric_k: 5
+  qa_delay: 1.1
+
+embeddings:
+  - provider: huggingface
+    model: BAAI/bge-small-en-v1.5
+  - provider: openai
+    model: text-embedding-3-small
+    api_key_env: OPENAI_API_KEY
+  - provider: ollama
+    model: nomic-embed-text
+    base_url: http://localhost:11434
+
+llms:
+  - provider: openrouter
+    model: openai/gpt-4.1-mini
+    api_key_env: OPENROUTER_API_KEY
+  - provider: openai
+    model: gpt-4.1-mini
+    api_key_env: OPENAI_API_KEY
+
+strategy_sets:
+  - strategies: [naive, fixed_window, token_text, semantic_splitter, dynamic_semantic]
+  - strategies: [markdown, token_text, dynamic_semantic]

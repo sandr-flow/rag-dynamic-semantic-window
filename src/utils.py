@@ -2,7 +2,6 @@
 
 import os
 import re
-from typing import Optional
 
 from dotenv import load_dotenv
 from llama_index.core.schema import TextNode
@@ -13,7 +12,7 @@ def load_env() -> None:
     load_dotenv()
 
 
-def get_env(key: str, default: Optional[str] = None) -> str:
+def get_env(key: str, default: str | None = None) -> str:
     """
     Get environment variable value.
 
@@ -91,5 +90,5 @@ def load_text_file(filepath: str) -> str:
     Returns:
         File contents as string.
     """
-    with open(filepath, "r", encoding="utf-8") as f:
+    with open(filepath, encoding="utf-8") as f:
         return f.read()

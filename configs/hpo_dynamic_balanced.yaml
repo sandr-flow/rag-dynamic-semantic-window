@@ -1,0 +1,36 @@
+search_space:
+  threshold:
+    type: float
+    low: 0.5
+    high: 0.99
+    step: 0.001
+  skip_threshold:
+    type: float
+    low: 0.5
+    high: 0.99
+    step: 0.001
+  relevance_threshold_pct:
+    type: float
+    low: 0.5
+    high: 0.99
+    step: 0.001
+  min_window:
+    type: int
+    low: 1
+    high: 5
+  max_expand:
+    type: int
+    low: 3
+    high: 10
+  merge_gap:
+    type: int
+    low: 1
+    high: 5
+
+objective:
+  soft_token_limit: 1200
+  hr_weight: 100.0
+  mrr_weight: 10.0
+  token_bonus_weight: 5.0
+  token_penalty_per_token: 0.01
+  invalid_score: -9999.0

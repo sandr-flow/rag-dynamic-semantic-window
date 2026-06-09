@@ -4,19 +4,18 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 from llama_index.core.postprocessor.types import BaseNodePostprocessor
 from llama_index.core.schema import NodeWithScore, QueryBundle, TextNode
 from llama_index.core.storage.docstore import BaseDocumentStore
+from pydantic import ConfigDict
 
 from src.config import (
     DEFAULT_ADAPTIVE_THRESHOLD_CONFIG,
     DEFAULT_EXPANSION_CONFIG,
     DEFAULT_SEED_VALIDATION_CONFIG,
 )
-
 
 # Patterns to filter garbage chunks (references, links, etc.)
 GARBAGE_PATTERNS = re.compile(
@@ -91,14 +90,13 @@ class DynamicSemanticExpander(BaseNodePostprocessor):
     seed_min_local_support: int = DEFAULT_SEED_VALIDATION_CONFIG.min_local_support
     seed_window_size: int = DEFAULT_SEED_VALIDATION_CONFIG.window_size
     seed_early_position_threshold: int = DEFAULT_SEED_VALIDATION_CONFIG.early_position_threshold
-    seed_rejection_log_path: Optional[str] = None
+    seed_rejection_log_path: str | None = None
 
     # Runtime caches (populated per request)
     _node_cache: dict = {}
     _embedding_cache: dict = {}
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def _prefetch_neighbors(self, seed_nodes: list[TextNode]) -> None:
         """
@@ -169,11 +167,11 @@ class DynamicSemanticExpander(BaseNodePostprocessor):
             except Exception:
                 pass
 
-    def _get_cached_node(self, node_id: str) -> Optional[TextNode]:
+    def _get_cached_node(self, node_id: str) -> TextNode | None:
         """Get node from cache (O(1) lookup instead of I/O)."""
         return self._node_cache.get(node_id)
 
-    def _get_cached_embedding(self, node_id: str) -> Optional[np.ndarray]:
+    def _get_cached_embedding(self, node_id: str) -> np.ndarray | None:
         """Get pre-converted numpy embedding from cache."""
         return self._embedding_cache.get(node_id)
 
@@ -339,7 +337,7 @@ class DynamicSemanticExpander(BaseNodePostprocessor):
         # Gradient change ratio
         gradient_change = gradients[-1] / prev_gradient
 
-        # If drop accelerated beyond threshold — stop
+        # If drop accelerated beyond threshold, stop.
         return gradient_change < self.gradient_cliff_factor
 
     def _log_rejected_seed(
@@ -382,7 +380,7 @@ class DynamicSemanticExpander(BaseNodePostprocessor):
     def _postprocess_nodes(
         self,
         nodes: list[NodeWithScore],
-        query_bundle: Optional[QueryBundle] = None,
+        query_bundle: QueryBundle | None = None,
     ) -> list[NodeWithScore]:
         """
         Process retrieved nodes and expand context based on semantic similarity.
@@ -473,7 +471,7 @@ class DynamicSemanticExpander(BaseNodePostprocessor):
     def _expand_cluster(
         self,
         seed_node: TextNode,
-        query_embedding: Optional[np.ndarray] = None,
+        query_embedding: np.ndarray | None = None,
         relevance_threshold: float = 0.6,
     ) -> list[TextNode]:
         """
@@ -690,7 +688,7 @@ class DynamicSemanticExpander(BaseNodePostprocessor):
     def _deduplicate(
         self,
         nodes: list[NodeWithScore],
-        query_embedding: Optional[np.ndarray] = None,
+        query_embedding: np.ndarray | None = None,
         relevance_threshold: float = 0.6,
         target_k: int = 5,
     ) -> list[NodeWithScore]:
@@ -884,7 +882,7 @@ class DynamicSemanticExpander(BaseNodePostprocessor):
             all_candidates.sort(key=lambda x: x[2], reverse=True)
 
             # Expand top candidates until we reach target_k
-            for node_id, pos, sim, emb in all_candidates:
+            for node_id, pos, sim, _emb in all_candidates:
                 if len(merged) >= target_k:
                     break
 

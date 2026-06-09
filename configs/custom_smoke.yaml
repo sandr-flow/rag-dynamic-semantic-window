@@ -1,0 +1,15 @@
+name: custom_smoke
+
+benchmark:
+  enabled: true
+  source: custom
+  dataset_path: data/custom_benchmark.jsonl
+  top_k: 5
+  metric_k: 5
+
+embeddings:
+  - provider: mock
+    model: mock:384
+
+strategy_sets:
+  - strategies: [naive, fixed_window, token_text, semantic_splitter, dynamic_semantic]

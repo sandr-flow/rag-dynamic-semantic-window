@@ -18,10 +18,11 @@ from pathlib import Path
 import numpy as np
 from dotenv import load_dotenv
 from llama_index.core import Settings
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 
-from src.config import DEFAULT_CORPUS_CONFIG
+from src.benchmark_datasets import load_benchmark_dataset
+from src.config import DEFAULT_BENCHMARK_CONFIG, DEFAULT_CORPUS_CONFIG
 from src.corpus_data import ArticleData, CorpusData, QuestionData, find_answer_sentence_idx
+from src.providers import build_embedding_model, embedding_config_from_env
 from src.question_generator import generate_qa_pairs_async
 from src.utils import split_into_sentences
 from src.wikipedia_loader import fetch_random_articles_batch
@@ -34,9 +35,9 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Prepare corpus for Optuna optimization")
     parser.add_argument(
         "--source",
-        choices=["wikipedia", "qasper"],
+        choices=["wikipedia", "qasper", "custom"],
         default="wikipedia",
-        help="Data source: wikipedia or qasper",
+        help="Data source: wikipedia, qasper, or custom",
     )
     parser.add_argument(
         "--num-articles",
@@ -61,6 +62,62 @@ def parse_args():
         type=int,
         default=DEFAULT_CORPUS_CONFIG.top_k_candidates,
         help="Number of top candidates to pre-compute",
+    )
+    parser.add_argument(
+        "--min-sentences",
+        type=int,
+        default=10,
+        help="Minimum sentence count required for an article to enter the cached corpus.",
+    )
+    parser.add_argument(
+        "--corpus-path",
+        type=str,
+        default=DEFAULT_CORPUS_CONFIG.corpus_cache_path,
+        help="Path to save binary corpus cache.",
+    )
+    parser.add_argument(
+        "--articles-output-path",
+        type=str,
+        default=DEFAULT_CORPUS_CONFIG.articles_jsonl_path,
+        help="Path to save raw articles JSONL.",
+    )
+    parser.add_argument(
+        "--questions-output-path",
+        type=str,
+        default=DEFAULT_CORPUS_CONFIG.questions_jsonl_path,
+        help="Path to save QA pairs JSONL.",
+    )
+    parser.add_argument("--embedding-provider", type=str, default=None)
+    parser.add_argument("--embedding-model", type=str, default=None)
+    parser.add_argument("--embedding-api-key-env", type=str, default=None)
+    parser.add_argument("--embedding-base-url", type=str, default=None)
+    parser.add_argument("--llm-provider", type=str, default=None)
+    parser.add_argument("--llm-model", type=str, default=None)
+    parser.add_argument("--llm-api-key-env", type=str, default=None)
+    parser.add_argument("--llm-base-url", type=str, default=None)
+    parser.add_argument(
+        "--qa-delay",
+        type=float,
+        default=float(os.getenv("QA_GENERATION_DELAY", DEFAULT_BENCHMARK_CONFIG.qa_generation_delay)),
+        help="Delay between QA-generation LLM calls in seconds.",
+    )
+    parser.add_argument(
+        "--dataset-path",
+        type=str,
+        default=None,
+        help="Combined JSON/JSONL custom dataset with text and qa_pairs.",
+    )
+    parser.add_argument(
+        "--articles-path",
+        type=str,
+        default=None,
+        help="Articles JSON/JSONL path for paired custom datasets.",
+    )
+    parser.add_argument(
+        "--questions-path",
+        type=str,
+        default=None,
+        help="Questions JSON/JSONL path for paired custom datasets.",
     )
     return parser.parse_args()
 
@@ -135,18 +192,33 @@ async def main():
     print("Corpus Preparation for Optuna Optimization")
     print("=" * 60)
     
-    # Setup paths
-    data_dir = Path(__file__).parent / "data"
-    data_dir.mkdir(exist_ok=True)
+    # Setup output paths
+    articles_path = Path(args.articles_output_path)
+    questions_path = Path(args.questions_output_path)
+    corpus_path = Path(args.corpus_path)
+    articles_path.parent.mkdir(parents=True, exist_ok=True)
+    questions_path.parent.mkdir(parents=True, exist_ok=True)
+    corpus_path.parent.mkdir(parents=True, exist_ok=True)
     
-    articles_path = data_dir / "articles.jsonl"
-    questions_path = data_dir / "questions.jsonl"
-    corpus_path = data_dir / "cached_corpus.pkl"
-    
+    # Make LLM CLI overrides visible to question_generator.
+    if args.llm_provider:
+        os.environ["LLM_PROVIDER"] = args.llm_provider
+    if args.llm_model:
+        os.environ["LLM_MODEL"] = args.llm_model
+    if args.llm_api_key_env:
+        os.environ["LLM_API_KEY_ENV"] = args.llm_api_key_env
+    if args.llm_base_url:
+        os.environ["LLM_BASE_URL"] = args.llm_base_url
+
     # Load embedding model
-    model_name = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
-    print(f"\n📦 Loading embedding model: {model_name}")
-    embed_model = HuggingFaceEmbedding(model_name=model_name)
+    embedding_config = embedding_config_from_env(
+        provider=args.embedding_provider,
+        model=args.embedding_model,
+        api_key_env=args.embedding_api_key_env,
+        base_url=args.embedding_base_url,
+    )
+    print(f"\n[INFO] Loading embedding model: {embedding_config.provider}/{embedding_config.model}")
+    embed_model = build_embedding_model(embedding_config)
     Settings.embed_model = embed_model
     
     # Get embedding dimension
@@ -156,28 +228,42 @@ async def main():
     
     start_time = time.time()
     
+    custom_qa_by_article_id: dict[int, list[dict]] = {}
+
     # Step 1: Fetch articles from selected source
-    if args.source == "qasper":
+    if args.source == "custom":
+        print("\n[INFO] Loading custom benchmark dataset...")
+        custom_items = load_benchmark_dataset(
+            dataset_path=args.dataset_path,
+            articles_path=args.articles_path,
+            questions_path=args.questions_path,
+        )
+        articles_raw = [(item["title"], item["text"]) for item in custom_items]
+        custom_qa_by_article_id = {
+            idx: item["qa_pairs"]
+            for idx, item in enumerate(custom_items)
+        }
+    elif args.source == "qasper":
         from src.qasper_loader import fetch_qasper_articles
-        print(f"\n📥 Loading {args.num_articles} QASPER articles (min {args.min_length} chars)...")
+        print(f"\n[INFO] Loading {args.num_articles} QASPER articles (min {args.min_length} chars)...")
         articles_raw = fetch_qasper_articles(args.num_articles, args.min_length)
     else:
-        print(f"\n📥 Fetching {args.num_articles} Wikipedia articles (min {args.min_length} chars)...")
+        print(f"\n[INFO] Fetching {args.num_articles} Wikipedia articles (min {args.min_length} chars)...")
         articles_raw = await fetch_random_articles_batch(
             count=args.num_articles,
             min_length=args.min_length,
         )
-    print(f"   ✅ Got {len(articles_raw)} articles")
+    print(f"   [OK] Got {len(articles_raw)} articles")
     
     # Step 2: Save raw articles to JSONL
-    print(f"\n💾 Saving raw articles to {articles_path}...")
+    print(f"\n[INFO] Saving raw articles to {articles_path}...")
     with open(articles_path, "w", encoding="utf-8") as f:
         for i, (title, text) in enumerate(articles_raw):
             json.dump({"id": i, "title": title, "text": text}, f, ensure_ascii=False)
             f.write("\n")
     
     # Step 3: Process articles - split sentences, compute embeddings
-    print("\n🔬 Processing articles...")
+    print("\n[INFO] Processing articles...")
     articles_data: list[ArticleData] = []
     
     for article_id, (title, text) in enumerate(articles_raw):
@@ -185,8 +271,8 @@ async def main():
         
         # Split into sentences
         sentences = split_into_sentences(text)
-        if len(sentences) < 10:
-            print(f"      ⚠️ Skipping (too few sentences: {len(sentences)})")
+        if len(sentences) < args.min_sentences:
+            print(f"      [WARN] Skipping (too few sentences: {len(sentences)})")
             continue
         
         # Compute sentence embeddings (batch)
@@ -205,18 +291,14 @@ async def main():
             neighbor_sims=neighbor_sims,
         ))
     
-    print(f"   ✅ Processed {len(articles_data)} articles")
+    print(f"   [OK] Processed {len(articles_data)} articles")
     
-    # Step 4: Generate QA pairs
-    print(f"\n📝 Generating QA pairs ({args.questions_per_article} per article)...")
     all_qa_pairs = []
-    
-    for article in articles_data:
-        # Join sentences back to text for QA generation
-        text = " ".join(article.sentences)
-        qa_pairs = await generate_qa_pairs_async(text, num_questions=args.questions_per_article)
-        
-        if qa_pairs:
+
+    if args.source == "custom":
+        print("\n[INFO] Using QA pairs from custom dataset...")
+        for article in articles_data:
+            qa_pairs = custom_qa_by_article_id.get(article.article_id, [])
             for qa in qa_pairs:
                 all_qa_pairs.append({
                     "article_id": article.article_id,
@@ -224,14 +306,30 @@ async def main():
                     "question": qa["question"],
                     "answer_sentence": qa.get("answer_sentence", qa.get("answer", "")),
                 })
+    else:
+        # Step 4: Generate QA pairs
+        print(f"\n[INFO] Generating QA pairs ({args.questions_per_article} per article)...")
         
-        # Rate limit for Mistral API
-        await asyncio.sleep(1.1)
+        for article in articles_data:
+            # Join sentences back to text for QA generation
+            text = " ".join(article.sentences)
+            qa_pairs = await generate_qa_pairs_async(text, num_questions=args.questions_per_article)
+            
+            if qa_pairs:
+                for qa in qa_pairs:
+                    all_qa_pairs.append({
+                        "article_id": article.article_id,
+                        "article_title": article.title,
+                        "question": qa["question"],
+                        "answer_sentence": qa.get("answer_sentence", qa.get("answer", "")),
+                    })
+            
+            await asyncio.sleep(max(0.0, args.qa_delay))
     
-    print(f"   ✅ Generated {len(all_qa_pairs)} QA pairs")
+    print(f"   [OK] Generated {len(all_qa_pairs)} QA pairs")
     
     # Step 5: Save QA pairs to JSONL
-    print(f"\n💾 Saving QA pairs to {questions_path}...")
+    print(f"\n[INFO] Saving QA pairs to {questions_path}...")
     with open(questions_path, "w", encoding="utf-8") as f:
         for i, qa in enumerate(all_qa_pairs):
             qa["question_id"] = i
@@ -239,7 +337,7 @@ async def main():
             f.write("\n")
     
     # Step 6: Compute question embeddings and similarity matrices
-    print("\n🔢 Computing question embeddings and similarity matrices...")
+    print("\n[INFO] Computing question embeddings and similarity matrices...")
     questions_data: list[QuestionData] = []
     
     # Build article lookup
@@ -280,15 +378,18 @@ async def main():
         if (i + 1) % 50 == 0:
             print(f"   Processed {i + 1}/{len(all_qa_pairs)} questions...")
     
-    print(f"   ✅ Computed embeddings for {len(questions_data)} questions")
+    print(f"   [OK] Computed embeddings for {len(questions_data)} questions")
     
     # Step 7: Create and save corpus
-    print(f"\n💾 Saving corpus cache to {corpus_path}...")
+    print(f"\n[INFO] Saving corpus cache to {corpus_path}...")
     corpus = CorpusData(
         articles=articles_data,
         questions=questions_data,
         embed_dim=embed_dim,
         top_k=args.top_k,
+        source=args.source,
+        embedding_provider=embedding_config.provider,
+        embedding_model=embedding_config.model,
     )
     
     with open(corpus_path, "wb") as f:
@@ -299,18 +400,20 @@ async def main():
     corpus_size_mb = corpus_path.stat().st_size / (1024 * 1024)
     
     print("\n" + "=" * 60)
-    print("✅ Corpus preparation complete!")
+    print("[OK] Corpus preparation complete!")
     print("=" * 60)
     print(f"   Articles: {len(articles_data)}")
     print(f"   Questions: {len(questions_data)}")
+    print(f"   Source: {args.source}")
+    print(f"   Embeddings: {embedding_config.provider}/{embedding_config.model}")
     print(f"   Embedding dim: {embed_dim}")
     print(f"   Top-K candidates: {args.top_k}")
     print(f"   Corpus size: {corpus_size_mb:.1f} MB")
     print(f"   Time elapsed: {elapsed:.1f}s")
     print()
-    print(f"   📄 Articles: {articles_path}")
-    print(f"   📄 Questions: {questions_path}")
-    print(f"   📦 Corpus: {corpus_path}")
+    print(f"   Articles: {articles_path}")
+    print(f"   Questions: {questions_path}")
+    print(f"   Corpus: {corpus_path}")
 
 
 if __name__ == "__main__":

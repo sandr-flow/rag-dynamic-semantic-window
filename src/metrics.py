@@ -1,7 +1,6 @@
 """Retrieval quality metrics for benchmark evaluation."""
 
 import math
-from typing import Optional
 
 
 def _contains_answer(chunk_text: str, answer_sentence: str) -> bool:
@@ -55,7 +54,7 @@ def mrr(retrieved_texts: list[str], answer_sentence: str) -> float:
 
 
 def precision_at_k(
-    retrieved_texts: list[str], answer_sentence: str, k: Optional[int] = None
+    retrieved_texts: list[str], answer_sentence: str, k: int | None = None
 ) -> float:
     """
     Calculate Precision@K.
@@ -82,7 +81,7 @@ def precision_at_k(
 
 
 def recall_at_k(
-    retrieved_texts: list[str], answer_sentence: str, k: Optional[int] = None
+    retrieved_texts: list[str], answer_sentence: str, k: int | None = None
 ) -> float:
     """
     Calculate Recall@K.
@@ -105,7 +104,7 @@ def recall_at_k(
 
 
 def ndcg_at_k(
-    retrieved_texts: list[str], answer_sentence: str, k: Optional[int] = None
+    retrieved_texts: list[str], answer_sentence: str, k: int | None = None
 ) -> float:
     """
     Calculate Normalized Discounted Cumulative Gain (NDCG@K).
@@ -171,7 +170,7 @@ def compute_all_metrics(
 
 
 def recall_at_k_ids(
-    retrieved_ids: list[str], relevant_ids: list[str], k: Optional[int] = None
+    retrieved_ids: list[str], relevant_ids: list[str], k: int | None = None
 ) -> float:
     """
     Calculate Recall@K for ID-based retrieval.
@@ -198,7 +197,7 @@ def recall_at_k_ids(
 
 
 def ndcg_at_k_ids(
-    retrieved_ids: list[str], relevant_ids: list[str], k: Optional[int] = None
+    retrieved_ids: list[str], relevant_ids: list[str], k: int | None = None
 ) -> float:
     """
     Calculate NDCG@K for ID-based retrieval (binary relevance).
