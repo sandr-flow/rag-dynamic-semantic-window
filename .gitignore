@@ -30,6 +30,11 @@ build/
 *.swp
 *.swo
 
+# Assistant/work planning artifacts
+.agents/
+.claude/
+.codex-tmp/
+
 # ChromaDB local storage
 chroma_db/
 
@@ -42,3 +47,6 @@ optuna*.db
 
 # Chunk logs
 logs/
+
+# Reusable artifacts (datasets, embeddings registry, tuned params, corpus cache)
+artifacts/

@@ -1,13 +1,25 @@
 """Wikipedia article loader for benchmark testing with parallel fetching."""
 
 import asyncio
+import os
 from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 import wikipediaapi
 
+# Wikimedia requires a descriptive User-Agent with contact info:
+# https://meta.wikimedia.org/wiki/User-Agent_policy
+_DEFAULT_USER_AGENT = (
+    "DynamicSemanticWindowBenchmark/1.0 "
+    "(https://github.com/rag-dynamic-semantic-window; mailto:benchmark@example.com)"
+)
+
 # Reusable Wikipedia client (created once)
 _wiki_client: wikipediaapi.Wikipedia | None = None
+
+
+def _user_agent() -> str:
+    return os.getenv("WIKIPEDIA_USER_AGENT", _DEFAULT_USER_AGENT)
 
 
 def _get_wiki_client() -> wikipediaapi.Wikipedia:
@@ -15,7 +27,7 @@ def _get_wiki_client() -> wikipediaapi.Wikipedia:
     global _wiki_client
     if _wiki_client is None:
         _wiki_client = wikipediaapi.Wikipedia(
-            user_agent="DynamicSemanticWindowBenchmark/1.0",
+            user_agent=_user_agent(),
             language="en",
         )
     return _wiki_client
@@ -41,9 +53,7 @@ def _fetch_random_titles(count: int = 10) -> list[str]:
                 "rnlimit": min(count, 500),
                 "format": "json",
             },
-            headers={
-                "User-Agent": "DynamicSemanticWindowBenchmark/1.0"
-            },
+            headers={"User-Agent": _user_agent()},
             timeout=60.0,
         )
         response.raise_for_status()

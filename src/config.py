@@ -158,66 +158,6 @@ class TokenTextSplitterConfig:
 
 
 @dataclass
-class MarkdownSplitterConfig:
-    """Configuration for MarkdownNodeParser strategy."""
-
-    header_path_separator: str = "/"
-    """Separator used for markdown header path metadata."""
-
-
-@dataclass
-class HTMLSplitterConfig:
-    """Configuration for HTMLNodeParser strategy."""
-
-    tags: tuple[str, ...] = (
-        "p",
-        "h1",
-        "h2",
-        "h3",
-        "h4",
-        "h5",
-        "h6",
-        "li",
-        "b",
-        "i",
-        "u",
-        "section",
-    )
-    """HTML tags to extract as nodes."""
-
-
-@dataclass
-class JSONSplitterConfig:
-    """Configuration for JSONNodeParser strategy."""
-
-    include_metadata: bool = True
-    """Include parser metadata in nodes."""
-
-
-@dataclass
-class CodeSplitterConfig:
-    """Configuration for CodeSplitter strategy."""
-
-    language: str = "python"
-    """Programming language grammar to use."""
-
-    chunk_lines: int = 40
-    """Target number of code lines per chunk."""
-
-    chunk_lines_overlap: int = 15
-    """Line overlap between chunks."""
-
-    max_chars: int = 1500
-    """Maximum characters per chunk."""
-
-    count_mode: str = "char"
-    """Counting mode: char or token."""
-
-    max_tokens: int = 512
-    """Maximum tokens when count_mode is token."""
-
-
-@dataclass
 class DynamicSemanticConfig:
     """Configuration for Dynamic Semantic strategy (experiment)."""
     
@@ -376,10 +316,6 @@ DEFAULT_NAIVE_CHUNKING_CONFIG = NaiveChunkingConfig()
 DEFAULT_FIXED_WINDOW_CONFIG = FixedWindowConfig()
 DEFAULT_SEMANTIC_SPLITTER_CONFIG = SemanticSplitterConfig()
 DEFAULT_TOKEN_TEXT_SPLITTER_CONFIG = TokenTextSplitterConfig()
-DEFAULT_MARKDOWN_SPLITTER_CONFIG = MarkdownSplitterConfig()
-DEFAULT_HTML_SPLITTER_CONFIG = HTMLSplitterConfig()
-DEFAULT_JSON_SPLITTER_CONFIG = JSONSplitterConfig()
-DEFAULT_CODE_SPLITTER_CONFIG = CodeSplitterConfig()
 DEFAULT_DYNAMIC_SEMANTIC_CONFIG = DynamicSemanticConfig()
 DEFAULT_RETRIEVAL_CONFIG = RetrievalConfig()
 DEFAULT_EMBEDDING_PROVIDER_CONFIG = EmbeddingProviderConfig()

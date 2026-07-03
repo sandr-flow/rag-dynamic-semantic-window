@@ -3,6 +3,9 @@ name = "rag-dynamic-semantic-window"
 version = "0.1.0"
 requires-python = ">=3.12"
 
+[project.scripts]
+stand = "stand.cli:main"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
@@ -15,3 +18,4 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 ignore = ["E501"]
+

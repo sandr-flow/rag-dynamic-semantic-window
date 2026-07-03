@@ -4,10 +4,6 @@ from abc import ABC, abstractmethod
 
 from llama_index.core import Settings, StorageContext, VectorStoreIndex
 from llama_index.core.node_parser import (
-    CodeSplitter,
-    HTMLNodeParser,
-    JSONNodeParser,
-    MarkdownNodeParser,
     SentenceSplitter,
     SentenceWindowNodeParser,
     TokenTextSplitter,
@@ -17,24 +13,16 @@ from llama_index.core.retrievers import VectorIndexRetriever
 from llama_index.core.schema import Document, NodeWithScore, QueryBundle
 
 from src.config import (
-    DEFAULT_CODE_SPLITTER_CONFIG,
     DEFAULT_DYNAMIC_SEMANTIC_CONFIG,
     DEFAULT_EXPANSION_CONFIG,
     DEFAULT_FIXED_WINDOW_CONFIG,
-    DEFAULT_HTML_SPLITTER_CONFIG,
-    DEFAULT_JSON_SPLITTER_CONFIG,
-    DEFAULT_MARKDOWN_SPLITTER_CONFIG,
     DEFAULT_NAIVE_CHUNKING_CONFIG,
     DEFAULT_RETRIEVAL_CONFIG,
     DEFAULT_SEMANTIC_SPLITTER_CONFIG,
     DEFAULT_TOKEN_TEXT_SPLITTER_CONFIG,
-    CodeSplitterConfig,
     DynamicSemanticConfig,
     ExpansionConfig,
     FixedWindowConfig,
-    HTMLSplitterConfig,
-    JSONSplitterConfig,
-    MarkdownSplitterConfig,
     NaiveChunkingConfig,
     SemanticSplitterConfig,
     TokenTextSplitterConfig,
@@ -183,117 +171,6 @@ class TokenTextSplitterStrategy(BaseStrategy):
         splitter = TokenTextSplitter(
             chunk_size=self.config.chunk_size,
             chunk_overlap=self.config.chunk_overlap,
-        )
-        nodes = splitter.get_nodes_from_documents(self.documents)
-        self.index = VectorStoreIndex(nodes)
-
-    def retrieve(self, query: str) -> list[NodeWithScore]:
-        retriever = VectorIndexRetriever(index=self.index, similarity_top_k=self.top_k)
-        return retriever.retrieve(query)
-
-
-class MarkdownSplitterStrategy(BaseStrategy):
-    """Baseline strategy using LlamaIndex MarkdownNodeParser."""
-
-    def __init__(
-        self,
-        documents: list[Document],
-        top_k: int = DEFAULT_RETRIEVAL_CONFIG.top_k,
-        config: MarkdownSplitterConfig | None = None,
-    ):
-        self.config = config or DEFAULT_MARKDOWN_SPLITTER_CONFIG
-        super().__init__(documents, top_k)
-
-    @property
-    def name(self) -> str:
-        return "Markdown Splitter"
-
-    def _build_index(self) -> None:
-        parser = MarkdownNodeParser(header_path_separator=self.config.header_path_separator)
-        nodes = parser.get_nodes_from_documents(self.documents)
-        self.index = VectorStoreIndex(nodes)
-
-    def retrieve(self, query: str) -> list[NodeWithScore]:
-        retriever = VectorIndexRetriever(index=self.index, similarity_top_k=self.top_k)
-        return retriever.retrieve(query)
-
-
-class HTMLSplitterStrategy(BaseStrategy):
-    """Baseline strategy using LlamaIndex HTMLNodeParser."""
-
-    def __init__(
-        self,
-        documents: list[Document],
-        top_k: int = DEFAULT_RETRIEVAL_CONFIG.top_k,
-        config: HTMLSplitterConfig | None = None,
-    ):
-        self.config = config or DEFAULT_HTML_SPLITTER_CONFIG
-        super().__init__(documents, top_k)
-
-    @property
-    def name(self) -> str:
-        return "HTML Splitter"
-
-    def _build_index(self) -> None:
-        parser = HTMLNodeParser(tags=list(self.config.tags))
-        nodes = parser.get_nodes_from_documents(self.documents)
-        self.index = VectorStoreIndex(nodes)
-
-    def retrieve(self, query: str) -> list[NodeWithScore]:
-        retriever = VectorIndexRetriever(index=self.index, similarity_top_k=self.top_k)
-        return retriever.retrieve(query)
-
-
-class JSONSplitterStrategy(BaseStrategy):
-    """Baseline strategy using LlamaIndex JSONNodeParser."""
-
-    def __init__(
-        self,
-        documents: list[Document],
-        top_k: int = DEFAULT_RETRIEVAL_CONFIG.top_k,
-        config: JSONSplitterConfig | None = None,
-    ):
-        self.config = config or DEFAULT_JSON_SPLITTER_CONFIG
-        super().__init__(documents, top_k)
-
-    @property
-    def name(self) -> str:
-        return "JSON Splitter"
-
-    def _build_index(self) -> None:
-        parser = JSONNodeParser(include_metadata=self.config.include_metadata)
-        nodes = parser.get_nodes_from_documents(self.documents)
-        self.index = VectorStoreIndex(nodes)
-
-    def retrieve(self, query: str) -> list[NodeWithScore]:
-        retriever = VectorIndexRetriever(index=self.index, similarity_top_k=self.top_k)
-        return retriever.retrieve(query)
-
-
-class CodeSplitterStrategy(BaseStrategy):
-    """Baseline strategy using LlamaIndex CodeSplitter."""
-
-    def __init__(
-        self,
-        documents: list[Document],
-        top_k: int = DEFAULT_RETRIEVAL_CONFIG.top_k,
-        config: CodeSplitterConfig | None = None,
-    ):
-        self.config = config or DEFAULT_CODE_SPLITTER_CONFIG
-        super().__init__(documents, top_k)
-
-    @property
-    def name(self) -> str:
-        return "Code Splitter"
-
-    def _build_index(self) -> None:
-        splitter = CodeSplitter(
-            language=self.config.language,
-            chunk_lines=self.config.chunk_lines,
-            chunk_lines_overlap=self.config.chunk_lines_overlap,
-            max_chars=self.config.max_chars,
-            count_mode=self.config.count_mode,
-            max_tokens=self.config.max_tokens,
         )
         nodes = splitter.get_nodes_from_documents(self.documents)
         self.index = VectorStoreIndex(nodes)

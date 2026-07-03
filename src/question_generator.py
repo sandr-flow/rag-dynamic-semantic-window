@@ -247,8 +247,8 @@ Return ONLY a JSON object with this exact format:
                     "answer_sentence": ans_sent
                 })
 
-        except Exception:
-            pass  # Squelch errors in async flow to allow retries
+        except Exception as e:
+            print(f"  [WARN] Error during QA generation retry: {e}")
         
         retry_count += 1
 

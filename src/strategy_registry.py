@@ -8,25 +8,17 @@ from typing import Any
 from llama_index.core.schema import Document
 
 from src.config import (
-    DEFAULT_CODE_SPLITTER_CONFIG,
     DEFAULT_DYNAMIC_SEMANTIC_CONFIG,
     DEFAULT_EXPANSION_CONFIG,
     DEFAULT_FIXED_WINDOW_CONFIG,
-    DEFAULT_HTML_SPLITTER_CONFIG,
-    DEFAULT_JSON_SPLITTER_CONFIG,
-    DEFAULT_MARKDOWN_SPLITTER_CONFIG,
     DEFAULT_NAIVE_CHUNKING_CONFIG,
     DEFAULT_SEMANTIC_SPLITTER_CONFIG,
     DEFAULT_TOKEN_TEXT_SPLITTER_CONFIG,
 )
 from src.strategies import (
     BaseStrategy,
-    CodeSplitterStrategy,
     DynamicSemanticStrategy,
     FixedWindowStrategy,
-    HTMLSplitterStrategy,
-    JSONSplitterStrategy,
-    MarkdownSplitterStrategy,
     NaiveChunkingStrategy,
     SemanticSplitterStrategy,
     TokenTextSplitterStrategy,
@@ -40,13 +32,9 @@ DEFAULT_STRATEGY_IDS = [
     "dynamic_semantic",
 ]
 
-ALL_STRATEGY_IDS = [
-    *DEFAULT_STRATEGY_IDS,
-    "markdown",
-    "html",
-    "json",
-    "code",
-]
+# Only text strategies are supported. ALL == DEFAULT (kept as an alias so the
+# "all" preset keeps working).
+ALL_STRATEGY_IDS = list(DEFAULT_STRATEGY_IDS)
 
 STRATEGY_DESCRIPTIONS = {
     "naive": "SentenceSplitter baseline for plain text.",
@@ -54,10 +42,6 @@ STRATEGY_DESCRIPTIONS = {
     "token_text": "TokenTextSplitter baseline for token-bounded chunks.",
     "semantic_splitter": "SemanticSplitterNodeParser baseline using embedding breakpoints.",
     "dynamic_semantic": "Custom dynamic semantic window strategy.",
-    "markdown": "MarkdownNodeParser for markdown documents.",
-    "html": "HTMLNodeParser for HTML documents.",
-    "json": "JSONNodeParser for structured JSON payloads.",
-    "code": "CodeSplitter for source code documents.",
 }
 
 STRATEGY_OVERRIDE_KEYS = {
@@ -77,10 +61,6 @@ STRATEGY_OVERRIDE_KEYS = {
         "target_clusters",
         "merge_gap",
     ],
-    "markdown": ["header_path_separator"],
-    "html": ["tags"],
-    "json": ["include_metadata"],
-    "code": ["language", "chunk_lines", "chunk_lines_overlap", "max_chars", "count_mode", "max_tokens"],
 }
 
 
@@ -99,17 +79,6 @@ ALIASES = {
     "semantic_splitter": "semantic_splitter",
     "dynamic": "dynamic_semantic",
     "dynamic_semantic": "dynamic_semantic",
-    "markdown": "markdown",
-    "markdown_splitter": "markdown",
-    "markdown_node_parser": "markdown",
-    "html": "html",
-    "html_splitter": "html",
-    "html_node_parser": "html",
-    "json": "json",
-    "json_splitter": "json",
-    "json_node_parser": "json",
-    "code": "code",
-    "code_splitter": "code",
 }
 
 
@@ -284,37 +253,6 @@ def create_strategy(
         )
         return SemanticSplitterStrategy(documents, top_k=top_k, config=config)
 
-    if strategy_id == "markdown":
-        config = _replace(
-            DEFAULT_MARKDOWN_SPLITTER_CONFIG,
-            overrides,
-            {"header_path_separator"},
-        )
-        return MarkdownSplitterStrategy(documents, top_k=top_k, config=config)
-
-    if strategy_id == "html":
-        config = _replace(DEFAULT_HTML_SPLITTER_CONFIG, overrides, {"tags"})
-        return HTMLSplitterStrategy(documents, top_k=top_k, config=config)
-
-    if strategy_id == "json":
-        config = _replace(DEFAULT_JSON_SPLITTER_CONFIG, overrides, {"include_metadata"})
-        return JSONSplitterStrategy(documents, top_k=top_k, config=config)
-
-    if strategy_id == "code":
-        config = _replace(
-            DEFAULT_CODE_SPLITTER_CONFIG,
-            overrides,
-            {
-                "language",
-                "chunk_lines",
-                "chunk_lines_overlap",
-                "max_chars",
-                "count_mode",
-                "max_tokens",
-            },
-        )
-        return CodeSplitterStrategy(documents, top_k=top_k, config=config)
-
     if strategy_id == "dynamic_semantic":
         dynamic_config = _replace(
             DEFAULT_DYNAMIC_SEMANTIC_CONFIG,
@@ -360,14 +298,6 @@ def _strategy_default_values(strategy_id: str) -> dict[str, Any]:
         return asdict(DEFAULT_TOKEN_TEXT_SPLITTER_CONFIG)
     if strategy_id == "semantic_splitter":
         return asdict(DEFAULT_SEMANTIC_SPLITTER_CONFIG)
-    if strategy_id == "markdown":
-        return asdict(DEFAULT_MARKDOWN_SPLITTER_CONFIG)
-    if strategy_id == "html":
-        return asdict(DEFAULT_HTML_SPLITTER_CONFIG)
-    if strategy_id == "json":
-        return asdict(DEFAULT_JSON_SPLITTER_CONFIG)
-    if strategy_id == "code":
-        return asdict(DEFAULT_CODE_SPLITTER_CONFIG)
     if strategy_id == "dynamic_semantic":
         return {
             **asdict(DEFAULT_DYNAMIC_SEMANTIC_CONFIG),
