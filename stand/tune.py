@@ -16,9 +16,16 @@ from pathlib import Path
 import numpy as np
 from llama_index.core import Settings
 
-from src.corpus_data import ArticleData, CorpusData, QuestionData, find_answer_sentence_idx
+from src.config import DEFAULT_DYNAMIC_SEMANTIC_CONFIG
+from src.corpus_data import (
+    ArticleData,
+    CorpusData,
+    QuestionData,
+    find_answer_sentence_idx,
+    split_corpus_by_documents,
+)
 from src.providers import build_embedding_model, embedding_config_from_env
-from src.utils import split_into_sentences
+from src.utils import build_embedding_texts, split_into_sentences
 
 from . import artifacts, paths
 
@@ -49,6 +56,7 @@ def _build_corpus(
     source: str,
     embedding_provider: str,
     embedding_model: str,
+    phantom_window: int,
     top_k: int = 100,
     min_sentences: int = 10,
 ) -> CorpusData:
@@ -58,8 +66,10 @@ def _build_corpus(
         sentences = split_into_sentences(item["text"])
         if len(sentences) < min_sentences:
             continue
+        embedding_texts = build_embedding_texts(sentences, phantom_window)
         embeddings = np.array(
-            [embed_model.get_text_embedding(s) for s in sentences], dtype=np.float32
+            [embed_model.get_text_embedding(text) for text in embedding_texts],
+            dtype=np.float32,
         )
         articles.append(
             ArticleData(
@@ -107,15 +117,28 @@ def _build_corpus(
         source=source,
         embedding_provider=embedding_provider,
         embedding_model=embedding_model,
+        phantom_window=phantom_window,
+        embedding_mode=_embedding_mode(phantom_window),
     )
 
 
-def _corpus_cache_path(dataset: str, embedding: str) -> Path:
-    return paths.CORPUS_CACHE_DIR / f"{artifacts.tuned_key(dataset, embedding)}.pkl"
+def _embedding_mode(phantom_window: int) -> str:
+    return f"phantom_w{phantom_window}" if phantom_window > 0 else "sentence"
 
 
-def _load_or_build_corpus(dataset: str, embedding: str, *, rebuild: bool) -> CorpusData:
-    cache_path = _corpus_cache_path(dataset, embedding)
+def _corpus_cache_path(dataset: str, embedding: str, phantom_window: int) -> Path:
+    key = f"{artifacts.tuned_key(dataset, embedding)}__{_embedding_mode(phantom_window)}"
+    return paths.CORPUS_CACHE_DIR / f"{key}.pkl"
+
+
+def _load_or_build_corpus(
+    dataset: str,
+    embedding: str,
+    *,
+    rebuild: bool,
+    phantom_window: int,
+) -> CorpusData:
+    cache_path = _corpus_cache_path(dataset, embedding, phantom_window)
     if cache_path.exists() and not rebuild:
         print(f"[INFO] Reusing cached corpus: {cache_path}")
         with open(cache_path, "rb") as f:
@@ -131,13 +154,17 @@ def _load_or_build_corpus(dataset: str, embedding: str, *, rebuild: bool) -> Cor
     Settings.embed_model = embed_model
 
     items = artifacts.load_dataset_items(dataset)
-    print(f"[INFO] Building corpus cache for {dataset} + {embedding} ({len(items)} docs)...")
+    print(
+        f"[INFO] Building corpus cache for {dataset} + {embedding} "
+        f"mode={_embedding_mode(phantom_window)} ({len(items)} docs)..."
+    )
     corpus = _build_corpus(
         items,
         embed_model,
         source=dataset,
         embedding_provider=embedding_config.provider,
         embedding_model=embedding_config.model,
+        phantom_window=phantom_window,
     )
     paths.CORPUS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     with open(cache_path, "wb") as f:
@@ -158,6 +185,9 @@ def tune(
     target_clusters: int = 5,
     soft_token_limit: int = 1200,
     rebuild_corpus: bool = False,
+    phantom_window: int = DEFAULT_DYNAMIC_SEMANTIC_CONFIG.phantom_window,
+    train_ratio: float = 0.70,
+    split_seed: int = 42,
 ) -> dict:
     """Run per-domain Optuna HPO and save a tuned-params artifact."""
     try:
@@ -165,12 +195,25 @@ def tune(
     except ImportError as exc:  # pragma: no cover - depends on env
         raise ValueError("Optuna not installed. Run: pip install optuna") from exc
 
-    from run_optuna import create_objective  # reuse the exact objective math
+    from run_optuna import create_objective, evaluate_params  # reuse exact objective math
     from src.hpo_config import load_hpo_settings
 
-    corpus = _load_or_build_corpus(dataset, embedding, rebuild=rebuild_corpus)
-    valid_questions = sum(1 for q in corpus.questions if q.answer_sentence_idx >= 0)
-    if valid_questions == 0:
+    corpus = _load_or_build_corpus(
+        dataset,
+        embedding,
+        rebuild=rebuild_corpus,
+        phantom_window=phantom_window,
+    )
+    train_corpus, val_corpus = split_corpus_by_documents(
+        corpus, train_ratio=train_ratio, seed=split_seed
+    )
+    valid_train_questions = sum(
+        1 for q in train_corpus.questions if q.answer_sentence_idx >= 0
+    )
+    valid_val_questions = sum(
+        1 for q in val_corpus.questions if q.answer_sentence_idx >= 0
+    )
+    if valid_train_questions == 0:
         raise ValueError(
             f"Corpus for '{dataset}' + '{embedding}' has no questions with a locatable "
             "answer sentence (documents may be too short for the min-sentence floor). "
@@ -178,29 +221,69 @@ def tune(
         )
     hpo_settings = load_hpo_settings(soft_token_limit=soft_token_limit)
 
-    print(f"\n[INFO] Running {n_trials} Optuna trials for {dataset} + {embedding}...")
+    print(
+        f"\n[INFO] Running {n_trials} Optuna trials for {dataset} + {embedding} "
+        f"({len(train_corpus.articles)} train docs/{valid_train_questions} valid q, "
+        f"{len(val_corpus.articles)} val docs/{valid_val_questions} valid q)..."
+    )
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     study = optuna.create_study(direction="maximize")
-    objective = create_objective(corpus, target_clusters=target_clusters, hpo_settings=hpo_settings)
+    objective = create_objective(
+        train_corpus,
+        target_clusters=target_clusters,
+        hpo_settings=hpo_settings,
+    )
     study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
 
     best = study.best_trial
-    metrics = {
-        "score": best.value,
-        "hit_rate": best.user_attrs.get("hit_rate", 0),
-        "mrr": best.user_attrs.get("mrr", 0),
-        "avg_tokens": best.user_attrs.get("avg_tokens", 0),
-        "tokens_ok": best.user_attrs.get("tokens_ok", False),
-    }
-    target = artifacts.save_tuned(dataset, embedding, best.params, metrics)
+    params = dict(best.params)
+    params["phantom_window"] = phantom_window
+    metrics_train = evaluate_params(
+        train_corpus,
+        best.params,
+        target_clusters=target_clusters,
+        hpo_settings=hpo_settings,
+    )
+    metrics_val = evaluate_params(
+        val_corpus,
+        best.params,
+        target_clusters=target_clusters,
+        hpo_settings=hpo_settings,
+    )
+    metrics = metrics_val if metrics_val["valid_questions"] else metrics_train
+    target = artifacts.save_tuned(
+        dataset,
+        embedding,
+        params,
+        metrics,
+        metrics_train=metrics_train,
+        metrics_val=metrics_val,
+        tuning={
+            "train_ratio": train_ratio,
+            "split_seed": split_seed,
+            "target_clusters": target_clusters,
+            "soft_token_limit": soft_token_limit,
+            "embedding_mode": _embedding_mode(phantom_window),
+            "phantom_window": phantom_window,
+            "train_articles": len(train_corpus.articles),
+            "val_articles": len(val_corpus.articles),
+        },
+    )
 
     print("\n" + "=" * 64)
     print(f"[OK] Best trial #{best.number}: score={best.value:.4f} "
-          f"HR={metrics['hit_rate']:.4f} MRR={metrics['mrr']:.4f} "
-          f"tokens={metrics['avg_tokens']:.0f}")
+          f"train_HR={metrics_train['hit_rate']:.4f} "
+          f"val_HR={metrics_val['hit_rate']:.4f} "
+          f"val_MRR={metrics_val['mrr']:.4f} "
+          f"val_tokens={metrics_val['avg_tokens']:.0f}")
     print("Best params:")
     for key, value in best.params.items():
         print(f"   {key}: {value}")
     print(f"\n[OK] Tuned artifact saved: {target}")
     print(f"     Use it with: --params tuned (dataset '{dataset}', embedding '{embedding}')")
-    return {"params": best.params, "metrics": metrics}
+    return {
+        "params": params,
+        "metrics": metrics,
+        "metrics_train": metrics_train,
+        "metrics_val": metrics_val,
+    }

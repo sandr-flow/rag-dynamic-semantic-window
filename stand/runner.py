@@ -28,17 +28,32 @@ def _count_tokens(text: str) -> int:
     return len(text) // 4
 
 
-def _resolve_overrides(config: RunConfig) -> dict[str, Any]:
-    """Return dynamic_semantic overrides if tuned params are requested."""
+def _resolve_tuned(config: RunConfig) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Return dynamic_semantic overrides and tuned manifest, if requested."""
     if config.params != "tuned":
-        return {}
+        return {}, None
     tuned = artifacts.load_tuned(config.dataset, config.embedding)
     if tuned is None:
         raise ValueError(
             f"No tuned params for dataset '{config.dataset}' + embedding "
             f"'{config.embedding}'. Run: python -m stand tune ..."
         )
-    return tuned.get("params", {})
+    return tuned.get("params", {}), tuned
+
+
+def _document_from_item(item: dict[str, Any], index: int) -> Document:
+    metadata = {
+        "source_doc": str(item.get("id", index)),
+        "title": item.get("title", f"item_{index}"),
+    }
+    # Identification metadata only: node parsers propagate these exclusions,
+    # so baseline strategies do not embed "source_doc: ...\ntitle: ..." text.
+    return Document(
+        text=item["text"],
+        metadata=metadata,
+        excluded_embed_metadata_keys=list(metadata.keys()),
+        excluded_llm_metadata_keys=list(metadata.keys()),
+    )
 
 
 def _should_log_step(current: int, total: int) -> bool:
@@ -118,7 +133,7 @@ def run(config: RunConfig, *, verbose: bool = True) -> dict[str, Any]:
     """Benchmark one combination and persist the result. Returns the result dict."""
     strategy_ids = [normalize_strategy_id(s) for s in config.strategies]
     metric_k = config.effective_metric_k
-    dynamic_overrides = _resolve_overrides(config)
+    dynamic_overrides, tuned_manifest = _resolve_tuned(config)
 
     embedding_info = artifacts.get_embedding(config.embedding)
     if embedding_info is None:
@@ -147,6 +162,14 @@ def run(config: RunConfig, *, verbose: bool = True) -> dict[str, Any]:
         print(f"Top-K: {config.top_k}, Metric-K: {metric_k}")
         if dynamic_overrides:
             print(f"Tuned dynamic params: {dynamic_overrides}")
+        if tuned_manifest and tuned_manifest.get("metrics_val"):
+            val = tuned_manifest["metrics_val"]
+            print(
+                "Tuned validation expectation: "
+                f"HR={val.get('hit_rate', 0):.4f}, "
+                f"MRR={val.get('mrr', 0):.4f}, "
+                f"tokens={val.get('avg_tokens', 0):.0f}"
+            )
         print("-" * 64)
 
     start = time.time()
@@ -154,7 +177,7 @@ def run(config: RunConfig, *, verbose: bool = True) -> dict[str, Any]:
     failed: set[str] = set()
 
     if config.index_mode == "shared":
-        documents = [Document(text=item["text"]) for item in items]
+        documents = [_document_from_item(item, idx) for idx, item in enumerate(items)]
         all_qa = [qa for item in items for qa in item["qa_pairs"]]
         shared_prefix = f"[shared {len(documents)} docs, {len(all_qa)} q]"
         if verbose:
@@ -191,7 +214,7 @@ def run(config: RunConfig, *, verbose: bool = True) -> dict[str, Any]:
             if verbose:
                 print(f"  {doc_prefix} {item['title']} ({n_q} q) - indexing...")
             doc_start = time.time()
-            documents = [Document(text=item["text"])]
+            documents = [_document_from_item(item, doc_idx - 1)]
             strategies = _build_strategies(
                 strategy_ids,
                 documents,
@@ -233,6 +256,13 @@ def run(config: RunConfig, *, verbose: bool = True) -> dict[str, Any]:
         "summary": summary,
         "aggregate": {name: [dict(m) for m in rows] for name, rows in aggregate.items()},
     }
+    if tuned_manifest:
+        result["tuned"] = {
+            "created_at": tuned_manifest.get("created_at"),
+            "metrics_train": tuned_manifest.get("metrics_train"),
+            "metrics_val": tuned_manifest.get("metrics_val"),
+            "tuning": tuned_manifest.get("tuning"),
+        }
     _save_result(result, config)
     return result
 

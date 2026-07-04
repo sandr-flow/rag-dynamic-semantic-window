@@ -121,6 +121,10 @@ python -m stand run --dataset wiki_100_qa --embedding bge-small \
 
 # Use tuned dynamic_semantic params when an artifact exists
 python -m stand run --dataset wiki_100_qa --embedding bge-small --params tuned
+
+# Tune dynamic_semantic on train documents and report held-out validation metrics
+python -m stand tune --dataset wiki_100_qa --embedding bge-small \
+  --phantom-window 1 --train-ratio 0.70 --split-seed 42
 ```
 
 Index modes:
@@ -129,7 +133,8 @@ Index modes:
   scoped to the source document for each question. This isolates chunking and
   expansion behavior.
 - `shared`: chunks from all documents go into one index. Retrieval competes
-  across the whole corpus and is closer to production RAG.
+  across the whole corpus and is closer to production RAG. Dynamic semantic
+  expansion is still bounded by each seed's `source_doc`.
 
 Each run prints a metrics table and writes a result JSON under `results/`.
 
@@ -149,8 +154,10 @@ Combined JSONL, one document per line:
 {"title": "Doc", "text": "Alpha beta. Gamma delta.", "qa_pairs": [{"question": "What starts the doc?", "answer": "Alpha beta", "answer_sentence": "Alpha beta."}]}
 ```
 
-The evaluator uses exact normalized substring matching against
-`answer_sentence`.
+The evaluator checks retrieved chunks against `answer_sentence` with exact
+normalized containment, plus a contiguous-token-window fallback that only
+tolerates sentences truncated at chunk boundaries. Fuzzy matching is used only
+to resolve the ground-truth sentence index when building HPO corpora.
 
 ## Configuration
 
@@ -173,7 +180,12 @@ Create `.env` with the provider settings you use.
 
 Use `mock/mock:384` only for infrastructure smoke tests.
 
-## Current Benchmark Results
+## Legacy Benchmark Results (Outdated)
+
+The numbers below are kept only as historical context. They were produced
+before the stage-0 validity fixes: unified expansion core, phantom-aligned HPO
+corpus, shared-mode document isolation, shared sentence segmentation, and
+held-out tuning metrics. Do not use them as the current baseline.
 
 Dataset: `wiki_100_qa`
 

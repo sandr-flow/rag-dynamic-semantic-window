@@ -1,8 +1,11 @@
 """Data structures for pre-computed corpus used in Optuna optimization."""
 
+import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
+
+from src.answer_matching import find_answer_sentence_idx as _find_answer_sentence_idx
 
 
 @dataclass
@@ -72,6 +75,8 @@ class CorpusData:
     source: str = "unknown"
     embedding_provider: str = "unknown"
     embedding_model: str = "unknown"
+    phantom_window: int = 0
+    embedding_mode: str = "sentence"
 
 
 def find_answer_sentence_idx(sentences: list[str], answer: str) -> int:
@@ -87,25 +92,53 @@ def find_answer_sentence_idx(sentences: list[str], answer: str) -> int:
     Returns:
         Index of the matching sentence, or -1 if not found.
     """
-    answer_normalized = answer.lower().strip()
-    
-    # First try exact substring match
-    for i, sent in enumerate(sentences):
-        if answer_normalized in sent.lower():
-            return i
-    
-    # Try token overlap for fuzzy matching
-    answer_tokens = set(answer_normalized.split())
-    best_idx = -1
-    best_overlap = 0.0
-    
-    for i, sent in enumerate(sentences):
-        sent_tokens = set(sent.lower().split())
-        if not answer_tokens:
-            continue
-        overlap = len(answer_tokens & sent_tokens) / len(answer_tokens)
-        if overlap > best_overlap and overlap >= 0.7:
-            best_overlap = overlap
-            best_idx = i
-    
-    return best_idx
+    return _find_answer_sentence_idx(sentences, answer)
+
+
+def subset_corpus_by_article_ids(corpus: CorpusData, article_ids: set[int]) -> CorpusData:
+    """Return a corpus view containing only selected articles and their questions."""
+    selected = set(article_ids)
+    return CorpusData(
+        articles=[article for article in corpus.articles if article.article_id in selected],
+        questions=[
+            question for question in corpus.questions if question.article_id in selected
+        ],
+        embed_dim=corpus.embed_dim,
+        top_k=corpus.top_k,
+        source=corpus.source,
+        embedding_provider=corpus.embedding_provider,
+        embedding_model=corpus.embedding_model,
+        phantom_window=corpus.phantom_window,
+        embedding_mode=corpus.embedding_mode,
+    )
+
+
+def split_corpus_by_documents(
+    corpus: CorpusData,
+    *,
+    train_ratio: float = 0.70,
+    seed: int = 42,
+) -> tuple[CorpusData, CorpusData]:
+    """Split a corpus into train/validation subsets by article id."""
+    article_ids = [article.article_id for article in corpus.articles]
+    if len(article_ids) < 2:
+        warnings.warn(
+            "corpus has fewer than 2 articles: train/validation split is "
+            "disabled, validation metrics will equal train metrics (full "
+            "leakage)",
+            stacklevel=2,
+        )
+        return corpus, corpus
+
+    rng = np.random.default_rng(seed)
+    shuffled = list(article_ids)
+    rng.shuffle(shuffled)
+    train_size = round(len(shuffled) * train_ratio)
+    train_size = max(1, min(len(shuffled) - 1, train_size))
+
+    train_ids = set(shuffled[:train_size])
+    val_ids = set(shuffled[train_size:])
+    return (
+        subset_corpus_by_article_ids(corpus, train_ids),
+        subset_corpus_by_article_ids(corpus, val_ids),
+    )

@@ -71,6 +71,23 @@ def test_expansion_stops_at_document_start():
     assert sorted(_source_positions(result[0])) == list(range(0, 4))
 
 
+def test_expansion_does_not_cross_document_segment_boundary():
+    sentences, embeddings = _uniform_corpus(6)
+    expander, nodes = _make_expander(
+        sentences,
+        embeddings,
+        doc_ids=["doc_a", "doc_a", "doc_a", "doc_b", "doc_b", "doc_b"],
+        max_expand=4,
+        min_window=1,
+    )
+
+    result = expander._postprocess_nodes([NodeWithScore(node=nodes[2], score=0.9)], None)
+
+    assert len(result) == 1
+    assert _source_positions(result[0]) == [0, 1, 2]
+    assert result[0].node.metadata["source_doc"] == "doc_a"
+
+
 # ---------------------------------------------------------------------------
 # Parity: adapter (LlamaIndex path) == core (HPO array path)
 # ---------------------------------------------------------------------------

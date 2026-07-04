@@ -1,5 +1,6 @@
 """Tests for the benchmark stand package (artifacts, config, runner)."""
 
+import numpy as np
 import pytest
 
 from stand import artifacts, paths
@@ -92,10 +93,83 @@ def test_embedding_registry_builtins_and_register(temp_artifacts):
 
 def test_tuned_roundtrip(temp_artifacts):
     assert not artifacts.has_tuned("ds", "mock")
-    artifacts.save_tuned("ds", "mock", {"threshold": 0.9}, {"hit_rate": 0.8})
+    artifacts.save_tuned(
+        "ds",
+        "mock",
+        {"threshold": 0.9},
+        {"hit_rate": 0.8},
+        metrics_train={"hit_rate": 0.9},
+        metrics_val={"hit_rate": 0.8},
+    )
     assert artifacts.has_tuned("ds", "mock")
     tuned = artifacts.load_tuned("ds", "mock")
     assert tuned["params"]["threshold"] == 0.9
+    assert tuned["metrics_train"]["hit_rate"] == 0.9
+    assert tuned["metrics_val"]["hit_rate"] == 0.8
+
+
+def test_tune_corpus_uses_phantom_embedding_texts():
+    from stand.tune import _build_corpus
+
+    class RecordingEmbedding:
+        def __init__(self):
+            self.texts = []
+
+        def get_text_embedding(self, text):
+            self.texts.append(text)
+            return [float(len(text)), 1.0, 0.0]
+
+    sentences = [f"Sentence {i} has enough content." for i in range(10)]
+    item = {
+        "title": "Doc",
+        "text": " ".join(sentences),
+        "qa_pairs": [
+            {
+                "question": "Which sentence is number five?",
+                "answer_sentence": sentences[5],
+            }
+        ],
+    }
+    embed_model = RecordingEmbedding()
+
+    corpus = _build_corpus(
+        [item],
+        embed_model,
+        source="mini",
+        embedding_provider="mock",
+        embedding_model="mock:3",
+        phantom_window=1,
+    )
+
+    assert corpus.embedding_mode == "phantom_w1"
+    assert corpus.phantom_window == 1
+    assert embed_model.texts[0] == f"{sentences[0]} {sentences[1]}"
+    assert embed_model.texts[5] == f"{sentences[4]} {sentences[5]} {sentences[6]}"
+    assert corpus.questions[0].answer_sentence_idx == 5
+
+
+def test_corpus_document_split_keeps_article_boundaries():
+    from src.corpus_data import ArticleData, CorpusData, QuestionData, split_corpus_by_documents
+
+    articles = [
+        ArticleData(i, f"doc_{i}", [f"sentence {i}"], np.ones((1, 2)), np.array([]))
+        for i in range(5)
+    ]
+    questions = [
+        QuestionData(i, i, "q", "a", 0, np.ones(2), np.ones(1), np.array([0]))
+        for i in range(5)
+    ]
+    corpus = CorpusData(articles=articles, questions=questions)
+
+    train, val = split_corpus_by_documents(corpus, train_ratio=0.6, seed=7)
+
+    train_ids = {article.article_id for article in train.articles}
+    val_ids = {article.article_id for article in val.articles}
+    assert train_ids
+    assert val_ids
+    assert train_ids.isdisjoint(val_ids)
+    assert {question.article_id for question in train.questions} == train_ids
+    assert {question.article_id for question in val.questions} == val_ids
 
 
 # ---------------------------------------------------------------------------
@@ -137,3 +211,22 @@ def test_runner_end_to_end_mock(temp_artifacts, index_mode):
     assert {"Naive Chunking", "Dynamic Semantic"} == names
     assert result["dataset"]["questions"] == 1
     assert "result_path" in result
+
+
+def test_document_metadata_is_excluded_from_embed_content():
+    from llama_index.core.node_parser import SentenceSplitter
+    from llama_index.core.schema import MetadataMode
+
+    from stand.runner import _document_from_item
+
+    item = {"id": 3, "title": "Some Long Article Title",
+            "text": "First sentence here. Second sentence here."}
+    document = _document_from_item(item, 0)
+    nodes = SentenceSplitter(chunk_size=64, chunk_overlap=0).get_nodes_from_documents(
+        [document]
+    )
+
+    embed_content = nodes[0].get_content(metadata_mode=MetadataMode.EMBED)
+    assert "source_doc" not in embed_content
+    assert "Some Long Article Title" not in embed_content
+    assert nodes[0].metadata["source_doc"] == "3"

@@ -1,5 +1,6 @@
 """Retrieval strategies for benchmark comparison."""
 
+import re
 from abc import ABC, abstractmethod
 
 import numpy as np
@@ -29,7 +30,23 @@ from src.config import (
     TokenTextSplitterConfig,
 )
 from src.dynamic_retriever import DynamicSemanticExpander
-from src.utils import create_sentence_nodes, split_into_sentences
+from src.utils import build_embedding_texts, create_sentence_nodes, split_into_sentences
+
+
+def _safe_doc_id(raw_doc_id: object, fallback: str, used: set[str]) -> str:
+    """Return a stable node-id-safe document id."""
+    value = str(raw_doc_id or fallback)
+    doc_id = re.sub(r"[^a-zA-Z0-9._-]+", "_", value.strip()).strip("_") or fallback
+    if doc_id not in used:
+        used.add(doc_id)
+        return doc_id
+
+    suffix = 2
+    while f"{doc_id}_{suffix}" in used:
+        suffix += 1
+    unique = f"{doc_id}_{suffix}"
+    used.add(unique)
+    return unique
 
 
 class BaseStrategy(ABC):
@@ -229,30 +246,32 @@ class DynamicSemanticStrategy(BaseStrategy):
 
     def _build_index(self) -> None:
         """Build index with per-sentence nodes using Phantom Embeddings."""
-        # Combine all document text
-        full_text = " ".join(doc.text for doc in self.documents)
-
-        # Split into sentences and create linked nodes
-        sentences = split_into_sentences(full_text)
-        nodes = create_sentence_nodes(sentences)
-
-        # Compute embeddings with phantom context
+        nodes = []
+        doc_ids = []
+        used_doc_ids: set[str] = set()
         embed_model = Settings.embed_model
 
-        for i, node in enumerate(nodes):
-            if self.phantom_window > 0:
-                # Build phantom context: [prev...prev, CENTER, next...next]
-                start_idx = max(0, i - self.phantom_window)
-                end_idx = min(len(nodes), i + self.phantom_window + 1)
+        for doc_idx, doc in enumerate(self.documents):
+            metadata = dict(getattr(doc, "metadata", {}) or {})
+            raw_doc_id = (
+                metadata.get("source_doc")
+                or metadata.get("id")
+                or getattr(doc, "id_", None)
+                or f"doc_{doc_idx}"
+            )
+            doc_id = _safe_doc_id(raw_doc_id, f"doc_{doc_idx}", used_doc_ids)
+            doc_sentences = split_into_sentences(doc.text)
+            doc_nodes = create_sentence_nodes(doc_sentences, doc_id=doc_id)
+            embedding_texts = build_embedding_texts(doc_sentences, self.phantom_window)
 
-                context_texts = [nodes[j].text for j in range(start_idx, end_idx)]
-                phantom_text = " ".join(context_texts)
+            for node, embedding_text in zip(doc_nodes, embedding_texts, strict=True):
+                node.metadata["source_doc"] = doc_id
+                if "title" in metadata:
+                    node.metadata["title"] = metadata["title"]
+                node.embedding = embed_model.get_text_embedding(embedding_text)
 
-                # Embedding from context, but node.text stays as single sentence
-                node.embedding = embed_model.get_text_embedding(phantom_text)
-            else:
-                # Original behavior: embed single sentence
-                node.embedding = embed_model.get_text_embedding(node.text)
+            nodes.extend(doc_nodes)
+            doc_ids.extend([doc_id] * len(doc_sentences))
 
         # Hand the sentence arrays to the expander before index construction:
         # VectorStoreIndex strips embeddings from the nodes it stores, so the
@@ -262,6 +281,7 @@ class DynamicSemanticStrategy(BaseStrategy):
             sentences=[node.text for node in nodes],
             node_ids=[node.node_id for node in nodes],
             embeddings=embeddings_matrix,
+            doc_ids=doc_ids,
             target_clusters=self.top_k,
             threshold=self.expansion_config.threshold,
             skip_threshold=self.expansion_config.skip_threshold,

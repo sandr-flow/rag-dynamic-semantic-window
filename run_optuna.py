@@ -17,6 +17,9 @@ import pickle
 import sys
 import time
 from pathlib import Path
+from typing import Any
+
+import numpy as np
 
 try:
     import optuna
@@ -126,6 +129,131 @@ def ensure_sqlite_storage_parent(storage: str) -> None:
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
 
+def _resolved_expansion_params(params: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "threshold": params.get("threshold", DEFAULT_EXPANSION_CONFIG.threshold),
+        "skip_threshold": params.get(
+            "skip_threshold", DEFAULT_EXPANSION_CONFIG.skip_threshold
+        ),
+        "relevance_threshold_pct": params.get(
+            "relevance_threshold_pct",
+            DEFAULT_EXPANSION_CONFIG.relevance_threshold_pct,
+        ),
+        "min_window": params.get("min_window", DEFAULT_EXPANSION_CONFIG.min_window),
+        "max_expand": params.get("max_expand", DEFAULT_EXPANSION_CONFIG.max_expand),
+        "merge_gap": params.get("merge_gap", DEFAULT_EXPANSION_CONFIG.merge_gap),
+    }
+
+
+def _evaluation_context(corpus: CorpusData):
+    article_lookup = {a.article_id: a for a in corpus.articles}
+    garbage_masks = {
+        a.article_id: build_garbage_mask(
+            a.sentences, DEFAULT_EXPANSION_CONFIG.min_chunk_length
+        )
+        for a in corpus.articles
+    }
+    return article_lookup, garbage_masks
+
+
+def evaluate_params(
+    corpus: CorpusData,
+    params: dict[str, Any],
+    *,
+    target_clusters: int = 5,
+    hpo_settings: HPOSettings | None = None,
+    article_lookup: dict[int, Any] | None = None,
+    garbage_masks: dict[int, np.ndarray] | None = None,
+) -> dict[str, Any]:
+    """Evaluate one hyperparameter set against a cached corpus."""
+    if article_lookup is None or garbage_masks is None:
+        article_lookup, garbage_masks = _evaluation_context(corpus)
+
+    hpo_settings = hpo_settings or load_hpo_settings()
+    objective_policy = hpo_settings.objective
+    resolved = _resolved_expansion_params(params)
+
+    total_hits = 0
+    total_mrr = 0.0
+    total_tokens = 0
+    num_valid_questions = 0
+
+    for question in corpus.questions:
+        article = article_lookup.get(question.article_id)
+        if not article:
+            continue
+
+        expander = DynamicExpansionCore(
+            neighbor_sims=article.neighbor_sims,
+            sentence_sims=question.sentence_sims,
+            top_k_indices=question.top_k_indices,
+            threshold=resolved["threshold"],
+            skip_threshold=resolved["skip_threshold"],
+            min_window=resolved["min_window"],
+            max_expand=resolved["max_expand"],
+            relevance_threshold_pct=resolved["relevance_threshold_pct"],
+            merge_gap=resolved["merge_gap"],
+            target_clusters=target_clusters,
+            garbage_mask=garbage_masks.get(question.article_id),
+        )
+
+        clusters = expander.expand_and_retrieve()
+        metrics = evaluate_retrieval(
+            clusters=clusters,
+            answer_sentence_idx=question.answer_sentence_idx,
+            sentences=article.sentences,
+        )
+
+        if question.answer_sentence_idx >= 0:
+            total_hits += int(metrics["hit"])
+            if metrics["hit"] and metrics["rank"] > 0:
+                total_mrr += 1.0 / metrics["rank"]
+            num_valid_questions += 1
+        total_tokens += metrics["tokens"]
+
+    if num_valid_questions == 0:
+        return {
+            "score": objective_policy.invalid_score,
+            "hit_rate": 0.0,
+            "mrr": 0.0,
+            "avg_tokens": 0.0,
+            "tokens_ok": False,
+            "valid_questions": 0,
+            "total_questions": len(corpus.questions),
+            "articles": len(corpus.articles),
+        }
+
+    avg_hr = total_hits / num_valid_questions
+    avg_mrr = total_mrr / num_valid_questions
+    avg_tokens = total_tokens / len(corpus.questions) if corpus.questions else 0
+
+    tokens_ok = avg_tokens <= objective_policy.soft_token_limit
+    if not tokens_ok:
+        excess = avg_tokens - objective_policy.soft_token_limit
+        score = objective_policy.invalid_score - excess
+    else:
+        score = avg_hr * objective_policy.hr_weight
+        score += avg_mrr * objective_policy.mrr_weight
+        if objective_policy.token_bonus_weight:
+            token_bonus = (
+                (objective_policy.soft_token_limit - avg_tokens)
+                / objective_policy.soft_token_limit
+                * objective_policy.token_bonus_weight
+            )
+            score += token_bonus
+
+    return {
+        "score": score,
+        "hit_rate": avg_hr,
+        "mrr": avg_mrr,
+        "avg_tokens": avg_tokens,
+        "tokens_ok": tokens_ok,
+        "valid_questions": num_valid_questions,
+        "total_questions": len(corpus.questions),
+        "articles": len(corpus.articles),
+    }
+
+
 def create_objective(
     corpus: CorpusData,
     target_clusters: int = 5,
@@ -146,102 +274,29 @@ def create_objective(
     """
     # Build article lookup; garbage masks depend only on sentence texts, so
     # they are precomputed once and shared across trials.
-    article_lookup = {a.article_id: a for a in corpus.articles}
-    garbage_masks = {
-        a.article_id: build_garbage_mask(
-            a.sentences, DEFAULT_EXPANSION_CONFIG.min_chunk_length
-        )
-        for a in corpus.articles
-    }
+    article_lookup, garbage_masks = _evaluation_context(corpus)
     hpo_settings = hpo_settings or load_hpo_settings()
-    objective_policy = hpo_settings.objective
     
     def objective(trial: optuna.Trial) -> float:
         """Evaluate a single set of hyperparameters."""
         params = suggest_params(trial, hpo_settings.search_space)
-        threshold = params["threshold"]
-        skip_threshold = params["skip_threshold"]
-        relevance_threshold_pct = params["relevance_threshold_pct"]
-        min_window = params["min_window"]
-        max_expand = params["max_expand"]
-        merge_gap = params["merge_gap"]
-        
-        # Evaluate on all questions
-        total_hits = 0
-        total_mrr = 0.0  # Mean Reciprocal Rank
-        total_tokens = 0
-        num_valid_questions = 0
-        
-        for question in corpus.questions:
-            article = article_lookup.get(question.article_id)
-            if not article:
-                continue
-            
-            # Run the shared expansion core on the pre-computed arrays
-            expander = DynamicExpansionCore(
-                neighbor_sims=article.neighbor_sims,
-                sentence_sims=question.sentence_sims,
-                top_k_indices=question.top_k_indices,
-                threshold=threshold,
-                skip_threshold=skip_threshold,
-                min_window=min_window,
-                max_expand=max_expand,
-                relevance_threshold_pct=relevance_threshold_pct,
-                merge_gap=merge_gap,
-                target_clusters=target_clusters,
-                garbage_mask=garbage_masks.get(question.article_id),
-            )
-
-            # Expand and evaluate
-            clusters = expander.expand_and_retrieve()
-            metrics = evaluate_retrieval(
-                clusters=clusters,
-                answer_sentence_idx=question.answer_sentence_idx,
-                sentences=article.sentences,
-            )
-            
-            if question.answer_sentence_idx >= 0:
-                total_hits += int(metrics["hit"])
-                # MRR: 1/rank if hit, 0 otherwise
-                if metrics["hit"] and metrics["rank"] > 0:
-                    total_mrr += 1.0 / metrics["rank"]
-                num_valid_questions += 1
-            total_tokens += metrics["tokens"]
-        
-        # Compute averages
-        if num_valid_questions == 0:
-            return objective_policy.invalid_score
-        
-        avg_hr = total_hits / num_valid_questions
-        avg_mrr = total_mrr / num_valid_questions
-        avg_tokens = total_tokens / len(corpus.questions) if corpus.questions else 0
-        
-        tokens_ok = avg_tokens <= objective_policy.soft_token_limit
-        if not tokens_ok:
-            # Hard constraint: any over-limit trial must lose to any valid trial.
-            excess = avg_tokens - objective_policy.soft_token_limit
-            score = objective_policy.invalid_score - excess
-        else:
-            # Primary objective: maximize HR. MRR and token bonus are only tie-breakers
-            # when configured to non-zero weights.
-            score = avg_hr * objective_policy.hr_weight
-            score += avg_mrr * objective_policy.mrr_weight
-            if objective_policy.token_bonus_weight:
-                token_bonus = (
-                    (objective_policy.soft_token_limit - avg_tokens)
-                    / objective_policy.soft_token_limit
-                    * objective_policy.token_bonus_weight
-                )
-                score += token_bonus
+        metrics = evaluate_params(
+            corpus,
+            params,
+            target_clusters=target_clusters,
+            hpo_settings=hpo_settings,
+            article_lookup=article_lookup,
+            garbage_masks=garbage_masks,
+        )
         
         # Log intermediate values for analysis
-        trial.set_user_attr("hit_rate", avg_hr)
-        trial.set_user_attr("mrr", avg_mrr)
-        trial.set_user_attr("avg_tokens", avg_tokens)
-        trial.set_user_attr("score", score)
-        trial.set_user_attr("tokens_ok", tokens_ok)
+        trial.set_user_attr("hit_rate", metrics["hit_rate"])
+        trial.set_user_attr("mrr", metrics["mrr"])
+        trial.set_user_attr("avg_tokens", metrics["avg_tokens"])
+        trial.set_user_attr("score", metrics["score"])
+        trial.set_user_attr("tokens_ok", metrics["tokens_ok"])
         
-        return score
+        return metrics["score"]
     
     return objective
 

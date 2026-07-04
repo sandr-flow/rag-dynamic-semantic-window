@@ -111,6 +111,8 @@ class DynamicExpansionCore:
             adaptive decay then anchors on a neutral seed score of 1.0.
         garbage_mask: Optional boolean mask (True = garbage); garbage
             sentences are trimmed from cluster edges, empty clusters dropped.
+        segment_ids: Optional segment/document id per sentence. Expansion and
+            merge never cross segment boundaries.
     """
 
     def __init__(
@@ -134,6 +136,7 @@ class DynamicExpansionCore:
         gradient_cliff_factor: float = DEFAULT_ADAPTIVE_THRESHOLD_CONFIG.gradient_cliff_factor,
         query_aware_enabled: bool = True,
         garbage_mask: np.ndarray | None = None,
+        segment_ids: np.ndarray | list[str] | None = None,
     ):
         self.neighbor_sims = neighbor_sims
         self.sentence_sims = sentence_sims
@@ -158,6 +161,11 @@ class DynamicExpansionCore:
 
         self.query_aware_enabled = query_aware_enabled
         self.garbage_mask = garbage_mask
+        self.segment_ids = (
+            np.asarray(segment_ids, dtype=object) if segment_ids is not None else None
+        )
+        if self.segment_ids is not None and len(self.segment_ids) != self.num_sentences:
+            raise ValueError("segment_ids must be aligned with sentence_sims")
 
     def expand_and_retrieve(self) -> list[ExpandedCluster]:
         """
@@ -238,7 +246,7 @@ class DynamicExpansionCore:
         left_scores: list[float] = []
         for i in range(self.max_expand):
             next_left = left_idx - 1
-            if next_left < 0:
+            if next_left < 0 or not self._same_segment(seed_idx, next_left):
                 break
 
             if i >= self.min_window:
@@ -258,7 +266,9 @@ class DynamicExpansionCore:
                     )
                     if not query_relevant:
                         # Bridge one weak sentence if the pair beyond is strong
-                        if next_left - 1 >= 0:
+                        if next_left - 1 >= 0 and self._same_segment(
+                            seed_idx, next_left - 1
+                        ):
                             skip_sim = (
                                 float(self.neighbor_sims[next_left - 1])
                                 if next_left - 1 < len(self.neighbor_sims)
@@ -277,7 +287,9 @@ class DynamicExpansionCore:
         right_scores: list[float] = []
         for i in range(self.max_expand):
             next_right = right_idx + 1
-            if next_right >= self.num_sentences:
+            if next_right >= self.num_sentences or not self._same_segment(
+                seed_idx, next_right
+            ):
                 break
 
             if i >= self.min_window:
@@ -297,8 +309,10 @@ class DynamicExpansionCore:
                     )
                     if not query_relevant:
                         # Bridge one weak sentence if the pair beyond is strong
-                        if next_right + 1 < self.num_sentences and next_right < len(
-                            self.neighbor_sims
+                        if (
+                            next_right + 1 < self.num_sentences
+                            and self._same_segment(seed_idx, next_right + 1)
+                            and next_right < len(self.neighbor_sims)
                         ):
                             skip_sim = float(self.neighbor_sims[next_right])
                             if skip_sim >= self.skip_threshold:
@@ -315,6 +329,12 @@ class DynamicExpansionCore:
             seed_idx=seed_idx,
             score=float(self.sentence_sims[seed_idx]),
         )
+
+    def _same_segment(self, seed_idx: int, candidate_idx: int) -> bool:
+        """Return True when two sentence positions belong to one segment."""
+        if self.segment_ids is None:
+            return True
+        return self.segment_ids[seed_idx] == self.segment_ids[candidate_idx]
 
     def _adaptive_threshold(
         self,
@@ -409,7 +429,8 @@ class DynamicExpansionCore:
                     if used[j]:
                         continue
                     if (
-                        cluster_j.start_idx <= merged_end + self.merge_gap
+                        self._same_segment(cluster_i.seed_idx, cluster_j.seed_idx)
+                        and cluster_j.start_idx <= merged_end + self.merge_gap
                         and cluster_j.end_idx >= merged_start - self.merge_gap
                     ):
                         merged_start = min(merged_start, cluster_j.start_idx)

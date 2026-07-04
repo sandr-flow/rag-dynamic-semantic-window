@@ -4,7 +4,9 @@ import sys
 
 from run_optuna import ensure_sqlite_storage_parent
 from src.benchmark_datasets import load_benchmark_dataset
+from src.corpus_data import find_answer_sentence_idx
 from src.hpo_config import load_hpo_settings
+from src.metrics import hit_rate
 from src.providers import (
     build_embedding_model,
     embedding_config_from_env,
@@ -19,6 +21,7 @@ from src.strategy_registry import (
     strategy_catalog,
     validate_strategy_overrides_for_ids,
 )
+from src.utils import split_into_sentences
 
 
 def test_parse_strategy_aliases():
@@ -186,6 +189,32 @@ def test_hpo_config_loads_default_search_space_and_objective():
     assert settings.search_space["min_window"].type == "int"
     assert settings.objective.hr_weight == 100.0
     assert settings.objective.soft_token_limit == 1200
+
+
+def test_shared_sentence_splitter_handles_common_abbreviations():
+    text = "This e.g. example stays together. Fig. 3 shows the result. The value is 3.14."
+
+    sentences = split_into_sentences(text)
+
+    assert sentences == [
+        "This e.g. example stays together.",
+        "Fig. 3 shows the result.",
+        "The value is 3.14.",
+    ]
+
+
+def test_answer_matching_contract_between_metrics_and_corpus_lookup():
+    sentences = [
+        "A distractor sentence about alpha beta.",
+        "The quick brown fox jumps over the lazy dog.",
+    ]
+    paraphrased = "quick brown fox jumped over lazy dog"
+
+    # Sentence-level ground-truth resolution stays tolerant to paraphrase...
+    assert find_answer_sentence_idx(sentences, paraphrased) == 1
+    # ...while chunk-level hit metrics require (near-)verbatim containment.
+    assert hit_rate([sentences[1]], paraphrased) == 0.0
+    assert hit_rate([sentences[1]], sentences[1]) == 1.0
 
 
 def test_optuna_sqlite_storage_parent_is_created(tmp_path):

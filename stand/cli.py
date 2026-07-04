@@ -82,6 +82,9 @@ def _cmd_tune(args: argparse.Namespace) -> int:
         n_trials=args.n_trials,
         soft_token_limit=args.soft_token_limit,
         rebuild_corpus=args.rebuild_corpus,
+        phantom_window=args.phantom_window,
+        train_ratio=args.train_ratio,
+        split_seed=args.split_seed,
     )
     return 0
 
@@ -139,6 +142,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_tune.add_argument("--n-trials", type=int, default=100)
     p_tune.add_argument("--soft-token-limit", type=int, default=1200)
     p_tune.add_argument("--rebuild-corpus", action="store_true")
+    p_tune.add_argument("--phantom-window", type=int, default=1)
+    p_tune.add_argument("--train-ratio", type=float, default=0.70)
+    p_tune.add_argument("--split-seed", type=int, default=42)
 
     p_run = sub.add_parser("run", help="Run one combination non-interactively.")
     p_run.add_argument("--dataset", required=True)

@@ -45,6 +45,7 @@ class DynamicSemanticExpander(BaseNodePostprocessor):
     sentences: list[str]
     node_ids: list[str]
     embeddings: np.ndarray
+    doc_ids: list[str] | None = None
 
     # Expansion parameters (see ExpansionConfig)
     threshold: float = DEFAULT_EXPANSION_CONFIG.threshold
@@ -75,6 +76,7 @@ class DynamicSemanticExpander(BaseNodePostprocessor):
     _neighbor_sims: np.ndarray | None = PrivateAttr(default=None)
     _garbage_mask: np.ndarray | None = PrivateAttr(default=None)
     _id_to_pos: dict = PrivateAttr(default_factory=dict)
+    _segment_ids: np.ndarray | None = PrivateAttr(default=None)
 
     def _ensure_prepared(self) -> None:
         """Normalize embeddings and precompute derived arrays once."""
@@ -86,6 +88,8 @@ class DynamicSemanticExpander(BaseNodePostprocessor):
             raise ValueError(
                 "embeddings must be a (num_sentences, dim) array aligned with sentences"
             )
+        if self.doc_ids is not None and len(self.doc_ids) != len(self.sentences):
+            raise ValueError("doc_ids must be aligned with sentences")
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
         norms = np.where(norms == 0, 1, norms)
         normalized = embeddings / norms
@@ -98,6 +102,10 @@ class DynamicSemanticExpander(BaseNodePostprocessor):
         )
         self._garbage_mask = build_garbage_mask(self.sentences, self.min_chunk_length)
         self._id_to_pos = {node_id: pos for pos, node_id in enumerate(self.node_ids)}
+        self._segment_ids = np.asarray(
+            self.doc_ids if self.doc_ids is not None else ["doc"] * len(self.sentences),
+            dtype=object,
+        )
         self._prepared = True
 
     def _query_sims(self, query_bundle: QueryBundle | None) -> np.ndarray | None:
@@ -177,17 +185,20 @@ class DynamicSemanticExpander(BaseNodePostprocessor):
             gradient_cliff_factor=self.gradient_cliff_factor,
             query_aware_enabled=query_aware,
             garbage_mask=self._garbage_mask,
+            segment_ids=self._segment_ids,
         )
         clusters = core.expand_and_retrieve()
 
         results = []
         for cluster in clusters:
             span = range(cluster.start_idx, cluster.end_idx + 1)
+            source_doc = str(self._segment_ids[cluster.seed_idx])
             merged_text = " ".join(self.sentences[i] for i in span)
             new_node = TextNode(
                 text=merged_text,
                 metadata={
                     "source_nodes": [self.node_ids[i] for i in span],
+                    "source_doc": source_doc,
                     "expansion_size": len(span),
                     "seed_index": cluster.seed_idx,
                 },

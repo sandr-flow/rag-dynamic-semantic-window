@@ -217,18 +217,29 @@ def save_tuned(
     dataset: str,
     embedding: str,
     params: dict[str, Any],
-    metrics: dict[str, Any],
+    metrics: dict[str, Any] | None = None,
+    *,
+    metrics_train: dict[str, Any] | None = None,
+    metrics_val: dict[str, Any] | None = None,
+    tuning: dict[str, Any] | None = None,
 ) -> Path:
     """Persist Optuna best params for a (dataset, embedding) domain."""
     target = tuned_dir(dataset, embedding)
     target.mkdir(parents=True, exist_ok=True)
+    resolved_metrics = metrics or metrics_val or metrics_train or {}
     payload = {
         "dataset": slugify(dataset),
         "embedding": slugify(embedding),
         "params": params,
-        "metrics": metrics,
+        "metrics": resolved_metrics,
         "created_at": _now(),
     }
+    if metrics_train is not None:
+        payload["metrics_train"] = metrics_train
+    if metrics_val is not None:
+        payload["metrics_val"] = metrics_val
+    if tuning is not None:
+        payload["tuning"] = tuning
     with open(target / "manifest.json", "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
     return target

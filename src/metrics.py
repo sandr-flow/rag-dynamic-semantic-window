@@ -2,6 +2,8 @@
 
 import math
 
+from src.answer_matching import contains_answer
+
 
 def _contains_answer(chunk_text: str, answer_sentence: str) -> bool:
     """
@@ -9,10 +11,7 @@ def _contains_answer(chunk_text: str, answer_sentence: str) -> bool:
 
     Uses substring matching with normalization.
     """
-    # Normalize whitespace for comparison
-    chunk_norm = " ".join(chunk_text.lower().split())
-    answer_norm = " ".join(answer_sentence.lower().split())
-    return answer_norm in chunk_norm
+    return contains_answer(chunk_text, answer_sentence)
 
 
 def hit_rate(retrieved_texts: list[str], answer_sentence: str) -> float:
