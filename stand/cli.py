@@ -134,6 +134,26 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_significance(args: argparse.Namespace) -> int:
+    from src.significance import format_comparisons
+
+    from .analysis import significance_report
+
+    comparisons = significance_report(
+        args.result,
+        baseline_result_path=args.baseline_result,
+        target=args.target,
+        n_resamples=args.resamples,
+        seed=args.seed,
+    )
+    if not comparisons:
+        print("No baselines to compare against.")
+        return 0
+    for line in format_comparisons(comparisons, n_resamples=args.resamples):
+        print(line)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="stand", description=__doc__)
     sub = parser.add_subparsers(dest="command")
@@ -214,6 +234,21 @@ def build_parser() -> argparse.ArgumentParser:
         'of --params, e.g. \'{"min_window": 0, "max_expand": 0}\' for ablations.',
     )
 
+    p_sig = sub.add_parser(
+        "significance",
+        help="Paired bootstrap CIs (dHR/dMRR vs baselines) from saved result JSONs.",
+    )
+    p_sig.add_argument("result", help="Result JSON containing the target strategy rows.")
+    p_sig.add_argument(
+        "--baseline-result",
+        default=None,
+        help="Optional result JSON supplying baseline rows (same dataset, "
+        "index mode, and question order).",
+    )
+    p_sig.add_argument("--target", default="Dynamic Semantic")
+    p_sig.add_argument("--resamples", type=int, default=10000)
+    p_sig.add_argument("--seed", type=int, default=42)
+
     return parser
 
 
@@ -224,6 +259,7 @@ _HANDLERS = {
     "prepare-embedding": _cmd_prepare_embedding,
     "tune": _cmd_tune,
     "run": _cmd_run,
+    "significance": _cmd_significance,
 }
 
 

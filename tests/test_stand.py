@@ -274,6 +274,10 @@ def test_runner_end_to_end_mock(temp_artifacts, index_mode):
     assert result["dataset"]["questions"] == 1
     assert "result_path" in result
 
+    rows = result["comparisons"]["rows"]
+    assert {row["baseline"] for row in rows} == {"Naive Chunking"}
+    assert {row["metric"] for row in rows} == {"hr@3", "mrr"}
+
 
 def test_runner_second_run_hits_embedding_cache(temp_artifacts):
     from llama_index.core import Settings

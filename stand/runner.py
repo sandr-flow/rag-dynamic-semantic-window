@@ -16,6 +16,13 @@ import numpy as np
 from llama_index.core import Document
 
 from src.metrics import compute_all_metrics
+from src.significance import (
+    DEFAULT_CONFIDENCE,
+    DEFAULT_RESAMPLES,
+    DEFAULT_SEED,
+    compare_to_baselines,
+    format_comparisons,
+)
 from src.strategy_registry import (
     STRATEGY_OVERRIDE_KEYS,
     create_strategy,
@@ -256,8 +263,17 @@ def run(config: RunConfig, *, verbose: bool = True) -> dict[str, Any]:
 
     total_questions = sum(len(item["qa_pairs"]) for item in items)
     summary = _summarize(aggregate, metric_k)
+    comparisons = compare_to_baselines(
+        aggregate,
+        target="Dynamic Semantic",
+        metric_keys=[f"hr@{metric_k}", "mrr"],
+    )
     if verbose:
         _print_table(summary, metric_k)
+        if comparisons:
+            print()
+            for line in format_comparisons(comparisons):
+                print(line)
         print(f"\nTotal: {time.time() - start:.1f}s")
 
     result = {
@@ -266,6 +282,14 @@ def run(config: RunConfig, *, verbose: bool = True) -> dict[str, Any]:
         "summary": summary,
         "aggregate": {name: [dict(m) for m in rows] for name, rows in aggregate.items()},
     }
+    if comparisons:
+        result["comparisons"] = {
+            "target": "Dynamic Semantic",
+            "n_resamples": DEFAULT_RESAMPLES,
+            "confidence": DEFAULT_CONFIDENCE,
+            "seed": DEFAULT_SEED,
+            "rows": [comparison.to_dict() for comparison in comparisons],
+        }
     if tuned_manifest:
         result["tuned"] = {
             "created_at": tuned_manifest.get("created_at"),
