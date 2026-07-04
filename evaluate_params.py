@@ -6,8 +6,9 @@ Quick script to see what score any parameter set would get on the Optuna corpus.
 import pickle
 from pathlib import Path
 
-from src.cached_expander import CachedDynamicExpander, evaluate_retrieval
+from src.config import DEFAULT_EXPANSION_CONFIG
 from src.corpus_data import CorpusData
+from src.expansion_core import DynamicExpansionCore, build_garbage_mask, evaluate_retrieval
 
 # Parameter sets to evaluate
 PARAMS_TO_TEST = {
@@ -50,7 +51,13 @@ def compute_ndcg(rank: int, k: int = 5) -> float:
 def evaluate_params(corpus: CorpusData, params: dict) -> dict:
     """Evaluate a parameter set on the corpus."""
     article_lookup = {a.article_id: a for a in corpus.articles}
-    
+    garbage_masks = {
+        a.article_id: build_garbage_mask(
+            a.sentences, DEFAULT_EXPANSION_CONFIG.min_chunk_length
+        )
+        for a in corpus.articles
+    }
+
     total_hits = 0
     total_mrr = 0.0
     total_ndcg = 0.0
@@ -62,7 +69,7 @@ def evaluate_params(corpus: CorpusData, params: dict) -> dict:
         if not article:
             continue
         
-        expander = CachedDynamicExpander(
+        expander = DynamicExpansionCore(
             neighbor_sims=article.neighbor_sims,
             sentence_sims=question.sentence_sims,
             top_k_indices=question.top_k_indices,
@@ -73,6 +80,7 @@ def evaluate_params(corpus: CorpusData, params: dict) -> dict:
             relevance_threshold_pct=params["relevance_threshold_pct"],
             merge_gap=params["merge_gap"],
             target_clusters=5,
+            garbage_mask=garbage_masks.get(question.article_id),
         )
         
         clusters = expander.expand_and_retrieve()

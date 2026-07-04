@@ -77,11 +77,15 @@ class AdaptiveThresholdConfig:
 @dataclass
 class SeedValidationConfig:
     """Configuration for seed validation mechanism.
-    
+
     Uses Modified Z-score and local semantic support to filter
     outlier seeds (lone rangers) that may be false positives.
+
+    DEFERRED: not wired into the expansion pipeline. The mechanism rejected
+    valid seeds and was removed from the algorithm during the core
+    unification; see docs/math_foundations.md (section A) for the analysis.
     """
-    
+
     enabled: bool = False
     """Enable seed validation (currently disabled - was too aggressive)."""
     

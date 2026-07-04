@@ -226,7 +226,6 @@ def create_strategy(
     strategy_id: str,
     documents: list[Document],
     top_k: int,
-    seed_rejection_log_path: str | None = None,
     overrides: dict[str, Any] | None = None,
 ) -> BaseStrategy:
     """Create a retrieval strategy by id."""
@@ -276,7 +275,6 @@ def create_strategy(
         return DynamicSemanticStrategy(
             documents,
             top_k=top_k,
-            seed_rejection_log_path=seed_rejection_log_path,
             dynamic_config=dynamic_config,
             expansion_config=expansion_config,
         )

@@ -39,8 +39,9 @@ Useful inspection commands:
 
 - `src/strategies.py` - retrieval strategy implementations.
 - `src/strategy_registry.py` - strategy ids, aliases, and factory.
-- `src/dynamic_retriever.py` - custom Dynamic Semantic expansion logic.
-- `src/cached_expander.py` - cached Dynamic Semantic evaluator for Optuna.
+- `src/expansion_core.py` - the single Dynamic Semantic expansion implementation
+  (pure numpy core shared by the benchmark and HPO paths).
+- `src/dynamic_retriever.py` - LlamaIndex adapter over the expansion core.
 - `src/providers.py` - embedding and LLM provider factories, including OpenRouter.
 - `src/benchmark_datasets.py` - custom benchmark dataset loaders.
 - `src/experiment_config.py` - experiment YAML/JSON command expansion.

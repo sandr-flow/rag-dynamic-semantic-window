@@ -24,9 +24,9 @@ except ImportError:
     print("[ERROR] Optuna not installed. Run: pip install optuna")
     exit(1)
 
-from src.cached_expander import CachedDynamicExpander, evaluate_retrieval
-from src.config import DEFAULT_CORPUS_CONFIG, DEFAULT_OPTUNA_CONFIG
+from src.config import DEFAULT_CORPUS_CONFIG, DEFAULT_EXPANSION_CONFIG, DEFAULT_OPTUNA_CONFIG
 from src.corpus_data import CorpusData
+from src.expansion_core import DynamicExpansionCore, build_garbage_mask, evaluate_retrieval
 from src.hpo_config import HPOSettings, load_hpo_settings, suggest_params
 
 
@@ -69,7 +69,7 @@ def parse_args():
         "--soft-token-limit",
         type=int,
         default=1200,
-        help="Soft average-token limit used by the objective.",
+        help="Average-token limit used as a hard objective constraint.",
     )
     parser.add_argument(
         "--hpo-config",
@@ -144,8 +144,15 @@ def create_objective(
     Returns:
         Objective function for Optuna.
     """
-    # Build article lookup
+    # Build article lookup; garbage masks depend only on sentence texts, so
+    # they are precomputed once and shared across trials.
     article_lookup = {a.article_id: a for a in corpus.articles}
+    garbage_masks = {
+        a.article_id: build_garbage_mask(
+            a.sentences, DEFAULT_EXPANSION_CONFIG.min_chunk_length
+        )
+        for a in corpus.articles
+    }
     hpo_settings = hpo_settings or load_hpo_settings()
     objective_policy = hpo_settings.objective
     
@@ -170,8 +177,8 @@ def create_objective(
             if not article:
                 continue
             
-            # Create cached expander for this question
-            expander = CachedDynamicExpander(
+            # Run the shared expansion core on the pre-computed arrays
+            expander = DynamicExpansionCore(
                 neighbor_sims=article.neighbor_sims,
                 sentence_sims=question.sentence_sims,
                 top_k_indices=question.top_k_indices,
@@ -182,8 +189,9 @@ def create_objective(
                 relevance_threshold_pct=relevance_threshold_pct,
                 merge_gap=merge_gap,
                 target_clusters=target_clusters,
+                garbage_mask=garbage_masks.get(question.article_id),
             )
-            
+
             # Expand and evaluate
             clusters = expander.expand_and_retrieve()
             metrics = evaluate_retrieval(
@@ -208,33 +216,30 @@ def create_objective(
         avg_mrr = total_mrr / num_valid_questions
         avg_tokens = total_tokens / len(corpus.questions) if corpus.questions else 0
         
-        # Primary: HR (higher is better) - scaled 0-100
-        score = avg_hr * objective_policy.hr_weight
-        
-        # Secondary: MRR bonus - up to 10
-        score += avg_mrr * objective_policy.mrr_weight
-        
-        # Token efficiency bonus/penalty
-        if avg_tokens <= objective_policy.soft_token_limit:
-            # Bonus for being under limit (up to 5)
-            token_bonus = (
-                (objective_policy.soft_token_limit - avg_tokens)
-                / objective_policy.soft_token_limit
-                * objective_policy.token_bonus_weight
-            )
-            score += token_bonus
-        else:
-            # Soft penalty for being over limit
+        tokens_ok = avg_tokens <= objective_policy.soft_token_limit
+        if not tokens_ok:
+            # Hard constraint: any over-limit trial must lose to any valid trial.
             excess = avg_tokens - objective_policy.soft_token_limit
-            token_penalty = excess * objective_policy.token_penalty_per_token
-            score -= token_penalty
+            score = objective_policy.invalid_score - excess
+        else:
+            # Primary objective: maximize HR. MRR and token bonus are only tie-breakers
+            # when configured to non-zero weights.
+            score = avg_hr * objective_policy.hr_weight
+            score += avg_mrr * objective_policy.mrr_weight
+            if objective_policy.token_bonus_weight:
+                token_bonus = (
+                    (objective_policy.soft_token_limit - avg_tokens)
+                    / objective_policy.soft_token_limit
+                    * objective_policy.token_bonus_weight
+                )
+                score += token_bonus
         
         # Log intermediate values for analysis
         trial.set_user_attr("hit_rate", avg_hr)
         trial.set_user_attr("mrr", avg_mrr)
         trial.set_user_attr("avg_tokens", avg_tokens)
         trial.set_user_attr("score", score)
-        trial.set_user_attr("tokens_ok", avg_tokens <= objective_policy.soft_token_limit)
+        trial.set_user_attr("tokens_ok", tokens_ok)
         
         return score
     
@@ -271,7 +276,7 @@ def run_optuna() -> int:
     print(f"   Embeddings: {getattr(corpus, 'embedding_provider', 'unknown')}/{getattr(corpus, 'embedding_model', 'unknown')}")
     if args.hpo_config:
         print(f"   HPO config: {args.hpo_config}")
-    print(f"   Objective soft token limit: {hpo_settings.objective.soft_token_limit}")
+    print(f"   Objective token limit: {hpo_settings.objective.soft_token_limit}")
     
     # Count valid questions (with answer index found)
     valid_questions = sum(1 for q in corpus.questions if q.answer_sentence_idx >= 0)
@@ -320,7 +325,7 @@ def run_optuna() -> int:
     print(f"   Score: {best.value:.4f}")
     print(f"   Hit Rate: {best.user_attrs.get('hit_rate', 0):.4f}")
     print(f"   MRR: {best.user_attrs.get('mrr', 0):.4f}")
-    print(f"   Avg Tokens: {best.user_attrs.get('avg_tokens', 0):.1f} (soft limit: {hpo_settings.objective.soft_token_limit}) {'[OK]' if tokens_ok else '[WARN]'}")
+    print(f"   Avg Tokens: {best.user_attrs.get('avg_tokens', 0):.1f} (limit: {hpo_settings.objective.soft_token_limit}) {'[OK]' if tokens_ok else '[WARN]'}")
     
     print("\nBest hyperparameters:")
     for key, value in best.params.items():

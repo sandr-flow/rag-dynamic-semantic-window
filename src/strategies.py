@@ -2,7 +2,8 @@
 
 from abc import ABC, abstractmethod
 
-from llama_index.core import Settings, StorageContext, VectorStoreIndex
+import numpy as np
+from llama_index.core import Settings, VectorStoreIndex
 from llama_index.core.node_parser import (
     SentenceSplitter,
     SentenceWindowNodeParser,
@@ -196,7 +197,6 @@ class DynamicSemanticStrategy(BaseStrategy):
         self,
         documents: list[Document],
         top_k: int = DEFAULT_RETRIEVAL_CONFIG.top_k,
-        seed_rejection_log_path: str | None = None,
         phantom_window: int = DEFAULT_DYNAMIC_SEMANTIC_CONFIG.phantom_window,
         prefetch_multiplier: int = DEFAULT_DYNAMIC_SEMANTIC_CONFIG.prefetch_multiplier,
         dynamic_config: DynamicSemanticConfig | None = None,
@@ -211,11 +211,9 @@ class DynamicSemanticStrategy(BaseStrategy):
         Args:
             documents: List of documents to index.
             top_k: Number of results to retrieve.
-            seed_rejection_log_path: Path to log rejected seeds (JSONL format).
             phantom_window: Number of neighbors to include in embedding context (0 = disabled).
             prefetch_multiplier: Multiplier for first-pass retrieval (4 = fetch top_k*4 seeds).
         """
-        self.seed_rejection_log_path = seed_rejection_log_path
         self.dynamic_config = dynamic_config or DynamicSemanticConfig(
             phantom_window=phantom_window,
             prefetch_multiplier=prefetch_multiplier,
@@ -240,47 +238,30 @@ class DynamicSemanticStrategy(BaseStrategy):
 
         # Compute embeddings with phantom context
         embed_model = Settings.embed_model
-        
+
         for i, node in enumerate(nodes):
             if self.phantom_window > 0:
                 # Build phantom context: [prev...prev, CENTER, next...next]
                 start_idx = max(0, i - self.phantom_window)
                 end_idx = min(len(nodes), i + self.phantom_window + 1)
-                
+
                 context_texts = [nodes[j].text for j in range(start_idx, end_idx)]
                 phantom_text = " ".join(context_texts)
-                
+
                 # Embedding from context, but node.text stays as single sentence
                 node.embedding = embed_model.get_text_embedding(phantom_text)
             else:
                 # Original behavior: embed single sentence
                 node.embedding = embed_model.get_text_embedding(node.text)
 
-        # Build index with storage context for docstore access
-        storage_context = StorageContext.from_defaults()
-        storage_context.docstore.add_documents(nodes)
-
-        self.index = VectorStoreIndex(
-            nodes, storage_context=storage_context, store_nodes_override=True
-        )
-        self.docstore = storage_context.docstore
-
-    def retrieve(self, query: str) -> list[NodeWithScore]:
-        """
-        Retrieve with dynamic semantic expansion using two-pass approach.
-        
-        First pass: Fetch top_k * prefetch_multiplier seeds for broad coverage.
-        Second pass: Expand and deduplicate to target top_k results.
-        """
-        # Two-pass: first pass fetches more seeds for better coverage
-        prefetch_k = self.top_k * self.prefetch_multiplier
-        retriever = VectorIndexRetriever(index=self.index, similarity_top_k=prefetch_k)
-        nodes = retriever.retrieve(query)
-
-        # Apply dynamic expansion - uses defaults from config.py
-        expander = DynamicSemanticExpander(
-            docstore=self.docstore,
-            seed_rejection_log_path=self.seed_rejection_log_path,
+        # Hand the sentence arrays to the expander before index construction:
+        # VectorStoreIndex strips embeddings from the nodes it stores, so the
+        # docstore cannot serve as an embedding source afterwards.
+        embeddings_matrix = np.array([node.embedding for node in nodes], dtype=np.float32)
+        self.expander = DynamicSemanticExpander(
+            sentences=[node.text for node in nodes],
+            node_ids=[node.node_id for node in nodes],
+            embeddings=embeddings_matrix,
             target_clusters=self.top_k,
             threshold=self.expansion_config.threshold,
             skip_threshold=self.expansion_config.skip_threshold,
@@ -290,7 +271,22 @@ class DynamicSemanticStrategy(BaseStrategy):
             relevance_threshold_pct=self.expansion_config.relevance_threshold_pct,
             merge_gap=self.expansion_config.merge_gap,
         )
-        return expander.postprocess_nodes(nodes, QueryBundle(query_str=query))
+
+        self.index = VectorStoreIndex(nodes)
+
+    def retrieve(self, query: str) -> list[NodeWithScore]:
+        """
+        Retrieve with dynamic semantic expansion using two-pass approach.
+
+        First pass: Fetch top_k * prefetch_multiplier seeds for broad coverage.
+        Second pass: Expand and deduplicate to target top_k results.
+        """
+        # Two-pass: first pass fetches more seeds for better coverage
+        prefetch_k = self.top_k * self.prefetch_multiplier
+        retriever = VectorIndexRetriever(index=self.index, similarity_top_k=prefetch_k)
+        nodes = retriever.retrieve(query)
+
+        return self.expander.postprocess_nodes(nodes, QueryBundle(query_str=query))
 
 
 class SemanticSplitterStrategy(BaseStrategy):

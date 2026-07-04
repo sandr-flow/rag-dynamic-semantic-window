@@ -28,8 +28,8 @@ class ObjectivePolicy:
 
     soft_token_limit: int = 1200
     hr_weight: float = 100.0
-    mrr_weight: float = 10.0
-    token_bonus_weight: float = 5.0
+    mrr_weight: float = 0.01
+    token_bonus_weight: float = 0.0
     token_penalty_per_token: float = 0.01
     invalid_score: float = -9999.0
 
