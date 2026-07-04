@@ -182,12 +182,70 @@ Create `.env` with the provider settings you use.
 
 Use `mock/mock:384` only for infrastructure smoke tests.
 
+## Baseline Benchmark Results (2026-07-04)
+
+First full baseline after the stage-0 validity fixes (unified expansion core,
+phantom-aligned HPO corpus, shared-mode document isolation, shared sentence
+segmentation) and exact tiktoken (`cl100k_base`) token counting. Token numbers
+are not comparable with older chars/4-based results.
+
+Dataset: `wiki_100_qa`
+
+- Source: English Wikipedia
+- 100 articles, 300 generated QA pairs (QA model: `openai/gpt-5.4-nano`)
+- Embedding: `BAAI/bge-small-en-v1.5`
+- `top_k=5`, `metric_k=5`
+- Dynamic params: default (untuned; defaults predate the stage-0 fixes and
+  have not been re-tuned yet)
+
+Result files:
+
+- `results/benchmark_wiki_100_qa_per_document_20260704_210713.json`
+- `results/benchmark_wiki_100_qa_shared_20260704_211717.json`
+
+### Per-Document Index
+
+Retrieval is scoped to the known source article for each question.
+
+| Strategy | Tokens | HR@5 | MRR | P@5 | NDCG@5 |
+|----------|-------:|-----:|----:|----:|-------:|
+| Naive Chunking | 1079.8 | 0.9733 | 0.8294 | 0.2060 | 0.8648 |
+| Fixed Window | 1064.2 | 0.9700 | 0.8525 | 0.3267 | 0.8601 |
+| Token Text Splitter | 1216.4 | 0.9500 | 0.8054 | 0.1993 | 0.8408 |
+| Semantic Splitter | 1061.0 | 0.9467 | 0.7766 | 0.1907 | 0.8193 |
+| **Dynamic Semantic** | 1694.5 | **0.9900** | **0.9417** | 0.1987 | **0.9542** |
+
+### Shared Corpus Index
+
+All chunks from all 100 documents compete in one index.
+
+| Strategy | Tokens | HR@5 | MRR | P@5 | NDCG@5 |
+|----------|-------:|-----:|----:|----:|-------:|
+| Naive Chunking | 1082.4 | 0.9200 | 0.7888 | 0.1933 | 0.8214 |
+| Fixed Window | 1020.8 | 0.9567 | 0.8375 | 0.2940 | 0.8510 |
+| Token Text Splitter | 1213.7 | 0.9067 | 0.7649 | 0.1893 | 0.7999 |
+| Semantic Splitter | 1021.2 | 0.9133 | 0.7397 | 0.1840 | 0.7832 |
+| **Dynamic Semantic** | 1593.5 | **0.9767** | **0.8959** | 0.1967 | **0.9168** |
+
+### Reading These Numbers
+
+- Dynamic Semantic leads on HR/MRR/NDCG in both modes, but at default params
+  it spends ~55-60% more tokens than Fixed Window, so the project thesis
+  ("same quality for fewer tokens") is not demonstrated yet. Re-tuning
+  (default thresholds never worked in the old retrieval path) and HR-vs-token
+  budget curves are the next planned steps.
+- HR differences between the top strategies are within the statistical noise
+  at n=300 (95% CI is roughly +/-0.02-0.03); significance testing is planned.
+- Low P@5 for Dynamic Semantic is expected: merged clusters mean fewer,
+  larger retrieved units, which P@5 penalizes regardless of context quality.
+
 ## Legacy Benchmark Results (Outdated)
 
 The numbers below are kept only as historical context. They were produced
 before the stage-0 validity fixes: unified expansion core, phantom-aligned HPO
 corpus, shared-mode document isolation, shared sentence segmentation, and
-held-out tuning metrics. Do not use them as the current baseline.
+held-out tuning metrics. Token counts used the rough chars/4 estimate. Do not
+use them as the current baseline.
 
 Dataset: `wiki_100_qa`
 
