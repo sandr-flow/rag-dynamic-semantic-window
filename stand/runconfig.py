@@ -8,6 +8,7 @@ saved results. Every knob is declared here exactly once.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 INDEX_MODES = ("per_document", "shared")
 PARAM_SOURCES = ("default", "tuned")
@@ -48,6 +49,10 @@ class RunConfig:
 
     limit: int | None = None
     """Optional cap on number of documents from the dataset."""
+
+    dynamic_overrides: dict[str, Any] = field(default_factory=dict)
+    """dynamic_semantic param overrides applied on top of default/tuned params
+    (ablations and manual sweeps). Keys are validated by the runner."""
 
     def __post_init__(self) -> None:
         if self.index_mode not in INDEX_MODES:

@@ -103,6 +103,31 @@ def contains_answer(
     return False
 
 
+# Function words excluded from the lexical-overlap check between a question
+# and its answer sentence (they carry no topical signal).
+_STOPWORDS = frozenset(
+    """a an the and or but if then else when while of in on at by for with to
+    from as is are was were be been being do does did have has had will would
+    can could should may might must not no nor this that these those it its
+    they them their he she his her him we our you your i me my what which who
+    whom whose where why how there here also than more most much many some any
+    each other into over under about after before between during through""".split()
+)
+
+
+def content_token_overlap(question: str, answer_sentence: str) -> float:
+    """
+    Fraction of the question's content tokens that appear in the answer
+    sentence. Used to verify paraphrased questions no longer lexically mirror
+    their answer sentence (benchmark hardening).
+    """
+    question_tokens = [t for t in _tokens(question) if t not in _STOPWORDS]
+    if not question_tokens:
+        return 0.0
+    sentence_tokens = set(_tokens(answer_sentence))
+    return sum(1 for t in question_tokens if t in sentence_tokens) / len(question_tokens)
+
+
 def find_answer_sentence_idx(
     sentences: list[str],
     answer_text: str,

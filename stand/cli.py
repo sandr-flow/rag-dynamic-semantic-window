@@ -59,6 +59,20 @@ def _cmd_prepare_dataset(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_harden_dataset(args: argparse.Namespace) -> int:
+    from .prepare import harden_dataset
+
+    harden_dataset(
+        source_name=args.source_name,
+        target_name=args.name,
+        qa_provider=args.qa_provider,
+        qa_model=args.qa_model,
+        qa_delay=args.qa_delay,
+        max_overlap=args.max_overlap,
+    )
+    return 0
+
+
 def _cmd_prepare_embedding(args: argparse.Namespace) -> int:
     from .prepare import prepare_embedding
 
@@ -91,10 +105,18 @@ def _cmd_tune(args: argparse.Namespace) -> int:
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
+    import json
+
     from src.strategy_registry import parse_strategy_ids
 
     from .runconfig import RunConfig
     from .runner import run
+
+    dynamic_overrides = {}
+    if args.dynamic_overrides:
+        dynamic_overrides = json.loads(args.dynamic_overrides)
+        if not isinstance(dynamic_overrides, dict):
+            raise ValueError("--dynamic-overrides must be a JSON object")
 
     config = RunConfig(
         dataset=args.dataset,
@@ -105,6 +127,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         top_k=args.top_k,
         metric_k=args.metric_k,
         limit=args.limit,
+        dynamic_overrides=dynamic_overrides,
     )
     run(config)
     return 0
@@ -128,6 +151,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_ds.add_argument("--qa-model", default=None, help="LLM model for QA generation.")
     p_ds.add_argument("--qa-delay", type=float, default=1.1)
     p_ds.add_argument("--dataset-path", default=None, help="Source file for --source custom.")
+
+    p_hard = sub.add_parser(
+        "harden-dataset",
+        help="Paraphrase questions of an existing dataset away from answer lexis.",
+    )
+    p_hard.add_argument("--source-name", required=True, help="Existing dataset artifact.")
+    p_hard.add_argument("--name", required=True, help="Name for the hardened artifact.")
+    p_hard.add_argument("--qa-provider", default=None, help="LLM provider for paraphrasing.")
+    p_hard.add_argument("--qa-model", default=None, help="LLM model for paraphrasing.")
+    p_hard.add_argument("--qa-delay", type=float, default=1.1)
+    p_hard.add_argument(
+        "--max-overlap",
+        type=float,
+        default=0.35,
+        help="Max content-token overlap between question and answer sentence.",
+    )
 
     p_emb = sub.add_parser("prepare-embedding", help="Register/warm an embedding model.")
     p_emb.add_argument("--name", required=True)
@@ -161,6 +200,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--top-k", type=int, default=5)
     p_run.add_argument("--metric-k", type=int, default=None)
     p_run.add_argument("--limit", type=int, default=None)
+    p_run.add_argument(
+        "--dynamic-overrides",
+        default=None,
+        help="JSON object with dynamic_semantic param overrides applied on top "
+        'of --params, e.g. \'{"min_window": 0, "max_expand": 0}\' for ablations.',
+    )
 
     return parser
 
@@ -168,6 +213,7 @@ def build_parser() -> argparse.ArgumentParser:
 _HANDLERS = {
     "list": _cmd_list,
     "prepare-dataset": _cmd_prepare_dataset,
+    "harden-dataset": _cmd_harden_dataset,
     "prepare-embedding": _cmd_prepare_embedding,
     "tune": _cmd_tune,
     "run": _cmd_run,

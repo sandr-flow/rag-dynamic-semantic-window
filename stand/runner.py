@@ -16,29 +16,46 @@ import numpy as np
 from llama_index.core import Document
 
 from src.metrics import compute_all_metrics
-from src.strategy_registry import create_strategy, normalize_strategy_id
+from src.strategy_registry import (
+    STRATEGY_OVERRIDE_KEYS,
+    create_strategy,
+    normalize_strategy_id,
+)
+from src.tokens import count_tokens
 
 from . import artifacts, paths
 from .embeddings import prepare_embed_model, report_cache
 from .runconfig import RunConfig
 
 
-def _count_tokens(text: str) -> int:
-    """Rough token estimate (chars / 4), matching the legacy benchmark."""
-    return len(text) // 4
-
-
 def _resolve_tuned(config: RunConfig) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    """Return dynamic_semantic overrides and tuned manifest, if requested."""
-    if config.params != "tuned":
-        return {}, None
-    tuned = artifacts.load_tuned(config.dataset, config.embedding)
-    if tuned is None:
-        raise ValueError(
-            f"No tuned params for dataset '{config.dataset}' + embedding "
-            f"'{config.embedding}'. Run: python -m stand tune ..."
-        )
-    return tuned.get("params", {}), tuned
+    """Return dynamic_semantic overrides and tuned manifest, if requested.
+
+    Manual ``config.dynamic_overrides`` are applied on top of the
+    default/tuned params so ablations can pin individual knobs.
+    """
+    params: dict[str, Any] = {}
+    tuned = None
+    if config.params == "tuned":
+        tuned = artifacts.load_tuned(config.dataset, config.embedding)
+        if tuned is None:
+            raise ValueError(
+                f"No tuned params for dataset '{config.dataset}' + embedding "
+                f"'{config.embedding}'. Run: python -m stand tune ..."
+            )
+        params.update(tuned.get("params", {}))
+
+    if config.dynamic_overrides:
+        allowed = set(STRATEGY_OVERRIDE_KEYS["dynamic_semantic"])
+        unknown = sorted(set(config.dynamic_overrides) - allowed)
+        if unknown:
+            raise ValueError(
+                "Unsupported dynamic_overrides keys: "
+                f"{', '.join(unknown)}. Allowed: {', '.join(sorted(allowed))}"
+            )
+        params.update(config.dynamic_overrides)
+
+    return params, tuned
 
 
 def _document_from_item(item: dict[str, Any], index: int) -> Document:
@@ -119,7 +136,7 @@ def _evaluate(
             nodes = strategy.retrieve(question)
             texts = [n.node.text for n in nodes]
             metrics = compute_all_metrics(texts, answer, k=metric_k)
-            metrics["tokens"] = _count_tokens(" ".join(texts))
+            metrics["tokens"] = count_tokens(" ".join(texts))
             results[strategy.name].append(metrics)
     return results
 
@@ -152,7 +169,7 @@ def run(config: RunConfig, *, verbose: bool = True) -> dict[str, Any]:
         print(f"Params:     {config.params}")
         print(f"Top-K: {config.top_k}, Metric-K: {metric_k}")
         if dynamic_overrides:
-            print(f"Tuned dynamic params: {dynamic_overrides}")
+            print(f"Dynamic params (tuned/overrides): {dynamic_overrides}")
         if tuned_manifest and tuned_manifest.get("metrics_val"):
             val = tuned_manifest["metrics_val"]
             print(
@@ -297,7 +314,7 @@ def _print_table(summary: list[dict[str, Any]], metric_k: int) -> None:
 
 
 def _config_payload(config: RunConfig, embedding_config) -> dict[str, Any]:
-    return {
+    payload = {
         "dataset": config.dataset,
         "embedding": config.embedding,
         "embedding_provider": embedding_config.provider,
@@ -308,6 +325,9 @@ def _config_payload(config: RunConfig, embedding_config) -> dict[str, Any]:
         "top_k": config.top_k,
         "metric_k": config.effective_metric_k,
     }
+    if config.dynamic_overrides:
+        payload["dynamic_overrides"] = dict(config.dynamic_overrides)
+    return payload
 
 
 def _save_result(result: dict[str, Any], config: RunConfig) -> Path:

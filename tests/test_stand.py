@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 
+from src.tokens import count_tokens
 from stand import artifacts, paths
 from stand.artifacts import EmbeddingInfo
 from stand.runconfig import RunConfig
@@ -258,6 +259,57 @@ def test_runner_second_run_hits_embedding_cache(temp_artifacts):
     stats = Settings.embed_model.cache_stats
     assert stats["misses"] == 0
     assert stats["hits"] > 0
+
+
+def test_runner_rejects_unknown_dynamic_overrides(temp_artifacts):
+    from stand.runner import _resolve_tuned
+
+    config = RunConfig(
+        dataset="whatever",
+        dynamic_overrides={"min_window": 0, "bogus_knob": 1},
+    )
+    with pytest.raises(ValueError, match="bogus_knob"):
+        _resolve_tuned(config)
+
+
+def test_runner_seeds_only_overrides(temp_artifacts):
+    """min_window=0 + max_expand=0 degenerates dynamic clusters to seeds."""
+    from stand.runner import run
+
+    items = [
+        {
+            "title": "Ablate",
+            "text": (
+                "Alpha topic sentence about databases. "
+                "Beta topic sentence about indexing. "
+                "Gamma topic sentence about caching. "
+                "Delta topic sentence about sharding."
+            ),
+            "qa_pairs": [
+                {"question": "What is said about caching?",
+                 "answer_sentence": "Gamma topic sentence about caching."},
+            ],
+        }
+    ]
+    artifacts.save_dataset("mini_ablate", items, source="custom", qa_model="custom")
+
+    overrides = {"min_window": 0, "max_expand": 0, "merge_gap": 0}
+    config = RunConfig(
+        dataset="mini_ablate",
+        embedding="mock",
+        strategies=["dynamic_semantic"],
+        top_k=3,
+        dynamic_overrides=overrides,
+    )
+    result = run(config, verbose=False)
+
+    assert result["config"]["dynamic_overrides"] == overrides
+    # Every retrieved unit is a single sentence: tokens per question must be
+    # well below the full 4-sentence document.
+    row = result["summary"][0]
+    assert row["strategy"] == "Dynamic Semantic"
+    full_doc_tokens = count_tokens(items[0]["text"])
+    assert 0 < row["tokens"] < full_doc_tokens
 
 
 def test_document_metadata_is_excluded_from_embed_content():

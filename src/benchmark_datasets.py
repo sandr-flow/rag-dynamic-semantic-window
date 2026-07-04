@@ -132,11 +132,17 @@ def _normalize_qa_pair(record: dict[str, Any]) -> dict[str, str]:
     if not question or not answer_sentence:
         raise ValueError(f"QA record must include question and answer_sentence/answer: {record}")
 
-    return {
+    normalized = {
         "question": str(question),
         "answer": str(answer),
         "answer_sentence": str(answer_sentence),
     }
+    # Preserve auxiliary fields (e.g. question_original, paraphrase_overlap
+    # from hardened datasets) without letting them shadow the core keys.
+    for key, value in record.items():
+        if key not in normalized and key not in ("query", "reference", "expected_answer"):
+            normalized[key] = value
+    return normalized
 
 
 def _as_records(payload: Any, key: str) -> list[dict[str, Any]]:

@@ -127,6 +127,100 @@ def prepare_dataset(
     )
 
 
+async def _harden_dataset_async(
+    *,
+    source_name: str,
+    target_name: str,
+    qa_provider: str | None,
+    qa_model: str | None,
+    qa_delay: float,
+    max_overlap: float,
+) -> artifacts.DatasetInfo:
+    from src.providers import llm_config_from_env
+    from src.question_paraphraser import paraphrase_question_async
+
+    qa_label = _apply_qa_model_env(qa_provider, qa_model)
+    config = llm_config_from_env(provider=qa_provider, model=qa_model)
+
+    items = artifacts.load_dataset_items(source_name)
+    total = sum(len(item.get("qa_pairs", [])) for item in items)
+    print(f"[INFO] Paraphrasing {total} questions from '{source_name}' with {qa_label}...")
+
+    done = 0
+    accepted = 0
+    overlaps_before: list[float] = []
+    overlaps_after: list[float] = []
+    hardened_items = []
+    for item in items:
+        hardened_pairs = []
+        for qa in item.get("qa_pairs", []):
+            answer = qa.get("answer", "")
+            answer_sentence = qa.get("answer_sentence", qa.get("answer", ""))
+            result = await paraphrase_question_async(
+                qa["question"],
+                answer,
+                answer_sentence,
+                config,
+                max_overlap=max_overlap,
+            )
+            done += 1
+            accepted += int(result["accepted"])
+            overlaps_before.append(result["original_overlap"])
+            overlaps_after.append(result["overlap"])
+            hardened_pairs.append(
+                {
+                    **qa,
+                    "question": result["question"],
+                    "question_original": qa["question"],
+                    "paraphrase_overlap": round(result["overlap"], 4),
+                }
+            )
+            if done % 25 == 0 or done == total:
+                print(f"  [{done}/{total}] accepted {accepted}, "
+                      f"overlap {overlaps_before[-1]:.2f} -> {overlaps_after[-1]:.2f}")
+            await asyncio.sleep(max(0.0, qa_delay))
+        hardened_items.append({**item, "qa_pairs": hardened_pairs})
+
+    mean_before = sum(overlaps_before) / max(1, len(overlaps_before))
+    mean_after = sum(overlaps_after) / max(1, len(overlaps_after))
+    print(f"[OK] Paraphrased {done} questions: accepted {accepted}/{done} "
+          f"(overlap <= {max_overlap}), mean overlap {mean_before:.3f} -> {mean_after:.3f}")
+
+    info = artifacts.save_dataset(
+        target_name, hardened_items, source=f"hardened:{source_name}", qa_model=qa_label
+    )
+    print(f"\n[OK] Hardened dataset artifact saved: {info.label()}")
+    print(f"     {artifacts.dataset_dir(target_name)}")
+    return info
+
+
+def harden_dataset(
+    *,
+    source_name: str,
+    target_name: str,
+    qa_provider: str | None = None,
+    qa_model: str | None = None,
+    qa_delay: float = 1.1,
+    max_overlap: float = 0.35,
+) -> artifacts.DatasetInfo:
+    """Build a paraphrased ("hard") copy of an existing dataset artifact.
+
+    Questions are rewritten away from the vocabulary of their answer sentence
+    (see src/question_paraphraser.py); answers and answer sentences stay
+    intact, so retrieval ground truth is unchanged.
+    """
+    return asyncio.run(
+        _harden_dataset_async(
+            source_name=source_name,
+            target_name=target_name,
+            qa_provider=qa_provider,
+            qa_model=qa_model,
+            qa_delay=qa_delay,
+            max_overlap=max_overlap,
+        )
+    )
+
+
 def prepare_embedding(
     *,
     name: str,
