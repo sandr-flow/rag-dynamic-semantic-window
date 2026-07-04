@@ -172,6 +172,8 @@ Create `.env` with the provider settings you use.
 | `EMBEDDING_MODEL` | Default embedding model | No |
 | `EMBEDDING_API_KEY_ENV` | Env var name containing the embedding API key | No |
 | `EMBEDDING_BASE_URL` | OpenAI-compatible embedding base URL | If custom |
+| `EMBEDDING_BATCH_SIZE` | Batch size for embedding calls (default 64) | No |
+| `EMBEDDING_CACHE` | Set `0` to disable the shared on-disk embedding cache | No |
 | `LLM_PROVIDER` | Default QA-generation provider id | No |
 | `LLM_MODEL` | Default QA-generation model | No |
 | `LLM_API_KEY_ENV` | Env var name containing the LLM API key | No |

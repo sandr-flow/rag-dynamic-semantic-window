@@ -13,13 +13,13 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from llama_index.core import Document, Settings
+from llama_index.core import Document
 
 from src.metrics import compute_all_metrics
-from src.providers import build_embedding_model, embedding_config_from_env
 from src.strategy_registry import create_strategy, normalize_strategy_id
 
 from . import artifacts, paths
+from .embeddings import prepare_embed_model, report_cache
 from .runconfig import RunConfig
 
 
@@ -135,16 +135,7 @@ def run(config: RunConfig, *, verbose: bool = True) -> dict[str, Any]:
     metric_k = config.effective_metric_k
     dynamic_overrides, tuned_manifest = _resolve_tuned(config)
 
-    embedding_info = artifacts.get_embedding(config.embedding)
-    if embedding_info is None:
-        raise ValueError(f"Unknown embedding '{config.embedding}'. See: python -m stand list")
-    embedding_config = embedding_config_from_env(
-        provider=embedding_info.provider,
-        model=embedding_info.model,
-        api_key_env=embedding_info.api_key_env,
-        base_url=embedding_info.base_url,
-    )
-    Settings.embed_model = build_embedding_model(embedding_config)
+    embed_model, embedding_config = prepare_embed_model(config.embedding)
 
     items = artifacts.load_dataset_items(config.dataset, limit=config.limit)
     if not items:
@@ -243,6 +234,8 @@ def run(config: RunConfig, *, verbose: bool = True) -> dict[str, Any]:
         raise ValueError(
             "No strategy could be built for this dataset. Skipped: " + ", ".join(sorted(failed))
         )
+
+    report_cache(embed_model, verbose=verbose)
 
     total_questions = sum(len(item["qa_pairs"]) for item in items)
     summary = _summarize(aggregate, metric_k)

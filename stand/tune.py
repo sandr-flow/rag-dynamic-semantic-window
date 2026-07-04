@@ -14,7 +14,6 @@ import pickle
 from pathlib import Path
 
 import numpy as np
-from llama_index.core import Settings
 
 from src.config import DEFAULT_DYNAMIC_SEMANTIC_CONFIG
 from src.corpus_data import (
@@ -24,10 +23,10 @@ from src.corpus_data import (
     find_answer_sentence_idx,
     split_corpus_by_documents,
 )
-from src.providers import build_embedding_model, embedding_config_from_env
 from src.utils import build_embedding_texts, split_into_sentences
 
 from . import artifacts, paths
+from .embeddings import prepare_embed_model, report_cache
 
 
 def _neighbor_sims(embeddings: np.ndarray) -> np.ndarray:
@@ -156,14 +155,7 @@ def _load_or_build_corpus(
         with open(cache_path, "rb") as f:
             return pickle.load(f)
 
-    info = artifacts.get_embedding(embedding)
-    if info is None:
-        raise ValueError(f"Unknown embedding '{embedding}'. See: python -m stand list")
-    embedding_config = embedding_config_from_env(
-        provider=info.provider, model=info.model, api_key_env=info.api_key_env, base_url=info.base_url
-    )
-    embed_model = build_embedding_model(embedding_config)
-    Settings.embed_model = embed_model
+    embed_model, embedding_config = prepare_embed_model(embedding)
 
     items = artifacts.load_dataset_items(dataset)
     print(
@@ -181,6 +173,7 @@ def _load_or_build_corpus(
     paths.CORPUS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     with open(cache_path, "wb") as f:
         pickle.dump(corpus, f)
+    report_cache(embed_model)
     valid = sum(1 for q in corpus.questions if q.answer_sentence_idx >= 0)
     print(
         f"[OK] Corpus cached: {len(corpus.articles)} articles, "

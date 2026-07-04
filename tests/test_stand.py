@@ -15,6 +15,7 @@ def temp_artifacts(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "DATASETS_DIR", tmp_path / "artifacts" / "datasets")
     monkeypatch.setattr(paths, "TUNED_DIR", tmp_path / "artifacts" / "tuned")
     monkeypatch.setattr(paths, "CORPUS_CACHE_DIR", tmp_path / "artifacts" / "corpus_cache")
+    monkeypatch.setattr(paths, "EMBEDDING_CACHE_DIR", tmp_path / "artifacts" / "embedding_cache")
     monkeypatch.setattr(paths, "EMBEDDINGS_REGISTRY", tmp_path / "artifacts" / "embeddings.json")
     monkeypatch.setattr(paths, "RESULTS_DIR", tmp_path / "results")
     paths.ensure_dirs()
@@ -218,6 +219,45 @@ def test_runner_end_to_end_mock(temp_artifacts, index_mode):
     assert {"Naive Chunking", "Dynamic Semantic"} == names
     assert result["dataset"]["questions"] == 1
     assert "result_path" in result
+
+
+def test_runner_second_run_hits_embedding_cache(temp_artifacts):
+    from llama_index.core import Settings
+
+    from stand.runner import run
+
+    items = [
+        {
+            "title": "Cache",
+            "text": (
+                "Caching stores computed values for reuse. "
+                "A cache hit avoids recomputation entirely. "
+                "A cache miss falls through to the model. "
+                "Eviction keeps the store bounded."
+            ),
+            "qa_pairs": [
+                {"question": "What does a cache hit avoid?",
+                 "answer_sentence": "A cache hit avoids recomputation entirely."},
+            ],
+        }
+    ]
+    artifacts.save_dataset("mini_cache", items, source="custom", qa_model="custom")
+    config = RunConfig(
+        dataset="mini_cache",
+        embedding="mock",
+        strategies=["naive", "dynamic_semantic"],
+        top_k=3,
+    )
+
+    run(config, verbose=False)
+    store_files = list((temp_artifacts / "artifacts" / "embedding_cache").glob("*.pkl"))
+    assert len(store_files) == 1
+
+    # Second run builds a fresh store over the same file: everything must hit.
+    run(config, verbose=False)
+    stats = Settings.embed_model.cache_stats
+    assert stats["misses"] == 0
+    assert stats["hits"] > 0
 
 
 def test_document_metadata_is_excluded_from_embed_content():
