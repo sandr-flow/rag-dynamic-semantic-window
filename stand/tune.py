@@ -62,14 +62,15 @@ def _build_corpus(
 ) -> CorpusData:
     """Precompute sentence/question embeddings + similarity matrices."""
     articles: list[ArticleData] = []
+    total = len(items)
+    log_stride = max(1, total // 10)
     for article_id, item in enumerate(items):
         sentences = split_into_sentences(item["text"])
         if len(sentences) < min_sentences:
             continue
         embedding_texts = build_embedding_texts(sentences, phantom_window)
         embeddings = np.array(
-            [embed_model.get_text_embedding(text) for text in embedding_texts],
-            dtype=np.float32,
+            embed_model.get_text_embedding_batch(embedding_texts), dtype=np.float32
         )
         articles.append(
             ArticleData(
@@ -80,33 +81,44 @@ def _build_corpus(
                 neighbor_sims=_neighbor_sims(embeddings),
             )
         )
+        if (article_id + 1) % log_stride == 0 or article_id + 1 == total:
+            print(f"  [INFO] embedded {article_id + 1}/{total} articles")
 
     item_by_id = {i: item for i, item in enumerate(items)}
 
-    questions: list[QuestionData] = []
-    qid = 0
+    # Collect all questions first, then embed them in one batched pass
+    pending: list[tuple[ArticleData, dict]] = []
     for article in articles:
         for qa in item_by_id[article.article_id].get("qa_pairs", []):
-            answer_sentence = qa.get("answer_sentence", qa.get("answer", ""))
-            q_embedding = np.array(
-                embed_model.get_text_embedding(qa["question"]), dtype=np.float32
+            pending.append((article, qa))
+
+    question_embeddings = (
+        embed_model.get_text_embedding_batch([qa["question"] for _, qa in pending])
+        if pending
+        else []
+    )
+
+    questions: list[QuestionData] = []
+    for qid, ((article, qa), raw_embedding) in enumerate(
+        zip(pending, question_embeddings, strict=True)
+    ):
+        answer_sentence = qa.get("answer_sentence", qa.get("answer", ""))
+        q_embedding = np.array(raw_embedding, dtype=np.float32)
+        sentence_sims = _question_sims(q_embedding, article.embeddings)
+        k = min(top_k, len(sentence_sims))
+        top_k_indices = np.argsort(sentence_sims)[::-1][:k].astype(np.int32)
+        questions.append(
+            QuestionData(
+                question_id=qid,
+                article_id=article.article_id,
+                question=qa["question"],
+                answer_sentence=answer_sentence,
+                answer_sentence_idx=find_answer_sentence_idx(article.sentences, answer_sentence),
+                embedding=q_embedding,
+                sentence_sims=sentence_sims,
+                top_k_indices=top_k_indices,
             )
-            sentence_sims = _question_sims(q_embedding, article.embeddings)
-            k = min(top_k, len(sentence_sims))
-            top_k_indices = np.argsort(sentence_sims)[::-1][:k].astype(np.int32)
-            questions.append(
-                QuestionData(
-                    question_id=qid,
-                    article_id=article.article_id,
-                    question=qa["question"],
-                    answer_sentence=answer_sentence,
-                    answer_sentence_idx=find_answer_sentence_idx(article.sentences, answer_sentence),
-                    embedding=q_embedding,
-                    sentence_sims=sentence_sims,
-                    top_k_indices=top_k_indices,
-                )
-            )
-            qid += 1
+        )
 
     embed_dim = articles[0].embeddings.shape[1] if articles else 384
     return CorpusData(

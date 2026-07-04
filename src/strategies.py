@@ -248,6 +248,7 @@ class DynamicSemanticStrategy(BaseStrategy):
         """Build index with per-sentence nodes using Phantom Embeddings."""
         nodes = []
         doc_ids = []
+        all_embedding_texts: list[str] = []
         used_doc_ids: set[str] = set()
         embed_model = Settings.embed_model
 
@@ -262,16 +263,23 @@ class DynamicSemanticStrategy(BaseStrategy):
             doc_id = _safe_doc_id(raw_doc_id, f"doc_{doc_idx}", used_doc_ids)
             doc_sentences = split_into_sentences(doc.text)
             doc_nodes = create_sentence_nodes(doc_sentences, doc_id=doc_id)
-            embedding_texts = build_embedding_texts(doc_sentences, self.phantom_window)
 
-            for node, embedding_text in zip(doc_nodes, embedding_texts, strict=True):
+            for node in doc_nodes:
                 node.metadata["source_doc"] = doc_id
                 if "title" in metadata:
                     node.metadata["title"] = metadata["title"]
-                node.embedding = embed_model.get_text_embedding(embedding_text)
 
             nodes.extend(doc_nodes)
             doc_ids.extend([doc_id] * len(doc_sentences))
+            # Phantom contexts never cross document boundaries
+            all_embedding_texts.extend(
+                build_embedding_texts(doc_sentences, self.phantom_window)
+            )
+
+        # One batched call instead of one model call per sentence
+        embeddings = embed_model.get_text_embedding_batch(all_embedding_texts)
+        for node, embedding in zip(nodes, embeddings, strict=True):
+            node.embedding = embedding
 
         # Hand the sentence arrays to the expander before index construction:
         # VectorStoreIndex strips embeddings from the nodes it stores, so the

@@ -199,6 +199,9 @@ class EmbeddingProviderConfig:
     base_url: str | None = None
     """Optional provider base URL."""
 
+    embed_batch_size: int = 64
+    """Batch size for get_text_embedding_batch (env: EMBEDDING_BATCH_SIZE)."""
+
 
 @dataclass
 class LLMProviderConfig:

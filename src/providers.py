@@ -108,7 +108,21 @@ def embedding_config_from_env(
         api_key_env=resolved_api_key_env,
         api_key=None,
         base_url=resolved_base_url,
+        embed_batch_size=_embed_batch_size_from_env(),
     )
+
+
+def _embed_batch_size_from_env() -> int:
+    raw = os.getenv("EMBEDDING_BATCH_SIZE")
+    if not raw:
+        return EmbeddingProviderConfig.embed_batch_size
+    try:
+        batch_size = int(raw)
+    except ValueError as exc:
+        raise ValueError("EMBEDDING_BATCH_SIZE must be an integer") from exc
+    if batch_size <= 0:
+        raise ValueError("EMBEDDING_BATCH_SIZE must be positive")
+    return batch_size
 
 
 def llm_config_from_env(
@@ -151,22 +165,28 @@ def build_embedding_model(config: EmbeddingProviderConfig):
     provider = config.provider.lower()
     api_key = _env_or_value(config.api_key, config.api_key_env)
 
+    batch_size = config.embed_batch_size
+
     if provider == "huggingface":
         from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 
-        return HuggingFaceEmbedding(model_name=config.model)
+        return HuggingFaceEmbedding(model_name=config.model, embed_batch_size=batch_size)
 
     if provider == "mock":
         from llama_index.core.embeddings import MockEmbedding
 
-        return MockEmbedding(embed_dim=_parse_mock_embed_dim(config.model))
+        return MockEmbedding(
+            embed_dim=_parse_mock_embed_dim(config.model), embed_batch_size=batch_size
+        )
 
     if provider == "mistral":
         from llama_index.embeddings.mistralai import MistralAIEmbedding
 
         if not api_key:
             raise ValueError(f"{config.api_key_env or 'MISTRAL_API_KEY'} not set")
-        return MistralAIEmbedding(model_name=config.model, api_key=api_key)
+        return MistralAIEmbedding(
+            model_name=config.model, api_key=api_key, embed_batch_size=batch_size
+        )
 
     if provider in {"openai", "custom"}:
         from llama_index.embeddings.openai import OpenAIEmbedding
@@ -175,7 +195,11 @@ def build_embedding_model(config: EmbeddingProviderConfig):
             raise ValueError(f"{config.api_key_env or 'OPENAI_API_KEY'} not set")
         if provider == "custom" and not config.base_url:
             raise ValueError("EMBEDDING_BASE_URL is required for custom embedding provider")
-        kwargs: dict[str, Any] = {"model": config.model, "api_key": api_key}
+        kwargs: dict[str, Any] = {
+            "model": config.model,
+            "api_key": api_key,
+            "embed_batch_size": batch_size,
+        }
         if config.base_url:
             kwargs["api_base"] = config.base_url
         return OpenAIEmbedding(**kwargs)
@@ -186,6 +210,7 @@ def build_embedding_model(config: EmbeddingProviderConfig):
         return OllamaEmbedding(
             model_name=config.model,
             base_url=config.base_url or os.getenv("OLLAMA_BASE_URL") or "http://localhost:11434",
+            embed_batch_size=batch_size,
         )
 
     raise ValueError(f"Unsupported embedding provider: {config.provider}")

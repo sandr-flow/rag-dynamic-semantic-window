@@ -114,10 +114,15 @@ def test_tune_corpus_uses_phantom_embedding_texts():
     class RecordingEmbedding:
         def __init__(self):
             self.texts = []
+            self.batch_calls = 0
 
         def get_text_embedding(self, text):
             self.texts.append(text)
             return [float(len(text)), 1.0, 0.0]
+
+        def get_text_embedding_batch(self, texts, **kwargs):
+            self.batch_calls += 1
+            return [self.get_text_embedding(text) for text in texts]
 
     sentences = [f"Sentence {i} has enough content." for i in range(10)]
     item = {
@@ -146,6 +151,8 @@ def test_tune_corpus_uses_phantom_embedding_texts():
     assert embed_model.texts[0] == f"{sentences[0]} {sentences[1]}"
     assert embed_model.texts[5] == f"{sentences[4]} {sentences[5]} {sentences[6]}"
     assert corpus.questions[0].answer_sentence_idx == 5
+    # One batched call for the article's sentences, one for all questions
+    assert embed_model.batch_calls == 2
 
 
 def test_corpus_document_split_keeps_article_boundaries():

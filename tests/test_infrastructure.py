@@ -448,3 +448,34 @@ def test_summarize_legacy_benchmark_result_schema(tmp_path):
     assert rows[0]["strategy"] == "Dynamic Semantic"
     assert rows[0]["avg_tokens"] == 42
     assert rows[0]["avg_hr@5"] == 1.0
+
+
+def test_dynamic_strategy_embeds_sentences_in_one_batch():
+    from typing import ClassVar
+
+    from llama_index.core import Document, Settings
+    from llama_index.core.embeddings import MockEmbedding
+
+    from src.strategies import DynamicSemanticStrategy
+
+    class CountingEmbedding(MockEmbedding):
+        batch_sizes: ClassVar[list[int]] = []
+
+        def get_text_embedding_batch(self, texts, **kwargs):
+            type(self).batch_sizes.append(len(texts))
+            return super().get_text_embedding_batch(texts, **kwargs)
+
+    CountingEmbedding.batch_sizes.clear()
+    old_embed_model = getattr(Settings, "_embed_model", None)
+    Settings.embed_model = CountingEmbedding(embed_dim=8)
+    try:
+        text = " ".join(
+            f"Sentence number {i} talks about one shared topic." for i in range(12)
+        )
+        DynamicSemanticStrategy([Document(text=text)], top_k=3)
+    finally:
+        Settings._embed_model = old_embed_model
+
+    # All 12 sentences must arrive in a single batched call, not 12 single calls
+    assert CountingEmbedding.batch_sizes
+    assert CountingEmbedding.batch_sizes[0] == 12
