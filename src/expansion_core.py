@@ -34,6 +34,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from src.config import DEFAULT_ADAPTIVE_THRESHOLD_CONFIG, DEFAULT_EXPANSION_CONFIG
+from src.tokens import count_tokens
 
 # Sentences that must not appear at cluster edges (references, links, etc.)
 GARBAGE_PATTERNS = re.compile(
@@ -491,13 +492,18 @@ def evaluate_retrieval(
             rank = i + 1  # 1-indexed rank
             break
 
-    # Count tokens (rough: chars / 4)
-    total_chars = 0
+    # Token accounting mirrors the benchmark path: sentences of a cluster are
+    # joined with spaces into one chunk, chunks are joined with spaces.
+    cluster_texts = []
     for cluster in clusters:
-        for idx in range(cluster.start_idx, cluster.end_idx + 1):
-            if 0 <= idx < len(sentences):
-                total_chars += len(sentences[idx])
-    tokens = total_chars // 4
+        parts = [
+            sentences[idx]
+            for idx in range(cluster.start_idx, cluster.end_idx + 1)
+            if 0 <= idx < len(sentences)
+        ]
+        if parts:
+            cluster_texts.append(" ".join(parts))
+    tokens = count_tokens(" ".join(cluster_texts))
 
     return {
         "hit": hit,

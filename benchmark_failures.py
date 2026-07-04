@@ -16,6 +16,7 @@ from src.strategies import (
     NaiveChunkingStrategy,
     SemanticSplitterStrategy,
 )
+from src.tokens import count_tokens
 
 load_dotenv()
 
@@ -23,11 +24,6 @@ load_dotenv()
 model_name = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
 print(f"Loading: {model_name}")
 Settings.embed_model = HuggingFaceEmbedding(model_name=model_name)
-
-
-def count_tokens(text: str) -> int:
-    """Rough token count (chars / 4)."""
-    return len(text) // 4
 
 
 def load_failures() -> list[dict]:

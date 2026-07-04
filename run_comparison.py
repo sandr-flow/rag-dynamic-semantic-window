@@ -23,6 +23,7 @@ from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from src.config import DEFAULT_EXPANSION_CONFIG, DynamicSemanticConfig, ExpansionConfig
 from src.metrics import compute_all_metrics
 from src.strategies import DynamicSemanticStrategy
+from src.tokens import count_tokens
 from src.wikipedia_loader import fetch_random_articles_batch
 
 load_dotenv()
@@ -56,11 +57,6 @@ def parse_args():
     parser.add_argument("--min-length", type=int, default=6000)
     parser.add_argument("--num-questions", type=int, default=3)
     return parser.parse_args()
-
-
-def count_tokens(text: str) -> int:
-    """Rough token count (chars / 4)."""
-    return len(text) // 4
 
 
 async def fetch_articles(count: int, min_length: int):
