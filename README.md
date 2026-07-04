@@ -134,6 +134,11 @@ python -m stand run --dataset wiki_100_qa --embedding bge-small --params tuned
 # embeddings, threshold search ranges adapted to the clean distribution.
 python -m stand tune --dataset wiki_100_qa_hard --embedding bge-small \
   --adjacency-space clean --hpo-config configs/hpo_clean_adjacency.yaml
+
+# Paired bootstrap CIs (dHR/dMRR vs baselines) for saved results; baseline
+# rows may come from a second file of the same dataset + index mode
+python -m stand significance results/benchmark_x_per_document_A.json \
+  --baseline-result results/benchmark_x_per_document_B.json
 ```
 
 The tuned artifact records `adjacency_space`, so `stand run --params tuned`
@@ -246,7 +251,8 @@ All chunks from all 100 documents compete in one index.
   Window is the strongest quality/cost point and serves as the reference
   for Dynamic Semantic in the next section.
 - HR differences between the top strategies are within the statistical noise
-  at n=300 (95% CI is roughly +/-0.02-0.03); significance testing is planned.
+  at n=300 (95% CI is roughly +/-0.02-0.03); `stand significance` computes
+  paired bootstrap CIs for any saved result pair.
 
 ## Dynamic Semantic Results (Tuned, Dual-Space)
 
@@ -304,10 +310,21 @@ Result files:
 ### Reading the Tuned Numbers
 
 The project thesis holds on both datasets in both index modes: higher HR/MRR
-than the strongest baseline at a smaller token budget (significance testing
-via paired bootstrap is the next planned step). Low P@5 relative to baselines
-is expected and not tracked here: merged clusters mean fewer, larger
-retrieved units, which P@5 penalizes regardless of context quality.
+than the strongest baseline at a smaller token budget. Paired bootstrap over
+questions (10000 resamples, 95% CI; `stand significance`) makes this precise:
+
+- ΔMRR is significantly positive vs every baseline in all four
+  dataset/mode combinations (+0.040 to +0.153).
+- ΔHR is never significantly negative anywhere; vs the strongest baseline
+  (Fixed Window) it is significantly positive on `wiki_100_qa_hard`
+  per-document (+0.037 [+0.007, +0.067]) and statistically indistinguishable
+  (positive, ns) in the other three combinations.
+- Tokens are lower than every baseline in every combination, so "same or
+  better quality for fewer tokens" is established with significance.
+
+Full CI tables are in `docs/improvement_plan.md`, step 1.2. Low P@5 relative
+to baselines is expected and not tracked here: merged clusters mean fewer,
+larger retrieved units, which P@5 penalizes regardless of context quality.
 
 ## Legacy Benchmark Results (Outdated)
 
