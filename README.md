@@ -24,10 +24,17 @@ query relevance, and expansion thresholds.
 `dynamic_semantic` is designed to retrieve compact, semantically coherent
 context. The current implementation focuses on:
 
-- phantom embeddings computed with surrounding context;
+- dual-space embeddings: phantom embeddings (sentence + neighbors) for
+  matching against the query, clean per-sentence embeddings for deciding
+  where the topic ends and expansion must stop;
 - two-pass retrieval: broad candidate search followed by refined expansion;
-- adaptive expansion based on local similarity signals;
+- adaptive expansion driven by adjacency similarity in the clean space;
 - query-aware filtering while expanding neighboring sentences.
+
+Parameters are tuned per domain (`stand tune`). The strategy is always
+evaluated with tuned params: the values shipped in `src/config.py` are
+legacy artifacts of the pre-fix retrieval path (pseudo-defaults), not a
+meaningful configuration.
 
 The main comparison point is whether this strategy can keep ranking quality high
 while reducing tokens returned to the downstream LLM.
@@ -122,19 +129,16 @@ python -m stand run --dataset wiki_100_qa --embedding bge-small \
 # Use tuned dynamic_semantic params when an artifact exists
 python -m stand run --dataset wiki_100_qa --embedding bge-small --params tuned
 
-# Tune dynamic_semantic on train documents and report held-out validation metrics
-python -m stand tune --dataset wiki_100_qa --embedding bge-small \
-  --phantom-window 1 --train-ratio 0.70 --split-seed 42
-
-# Dual-space tuning: adjacency sims from clean sentence embeddings
-# (search ranges adapted to the clean cosine distribution)
+# Tune dynamic_semantic on train documents (held-out validation metrics).
+# Dual-space is the reference setup: adjacency from clean sentence
+# embeddings, threshold search ranges adapted to the clean distribution.
 python -m stand tune --dataset wiki_100_qa_hard --embedding bge-small \
   --adjacency-space clean --hpo-config configs/hpo_clean_adjacency.yaml
 ```
 
 The tuned artifact records `adjacency_space`, so `stand run --params tuned`
-reproduces the space automatically. For one-off A/B runs use
-`--dynamic-overrides '{"adjacency_space": "clean"}'`.
+reproduces the space automatically. Phantom adjacency is kept only as an A/B
+control: `--dynamic-overrides '{"adjacency_space": "phantom"}'`.
 
 Index modes:
 
@@ -204,8 +208,10 @@ Dataset: `wiki_100_qa`
 - 100 articles, 300 generated QA pairs (QA model: `openai/gpt-5.4-nano`)
 - Embedding: `BAAI/bge-small-en-v1.5`
 - `top_k=5`, `metric_k=5`
-- Dynamic params: default (untuned; defaults predate the stage-0 fixes and
-  have not been re-tuned yet)
+
+`dynamic_semantic` is not in these tables: it is evaluated only with
+per-domain tuned params (next section), because its shipped defaults are
+pseudo-defaults from the pre-fix retrieval path.
 
 Result files:
 
@@ -222,7 +228,6 @@ Retrieval is scoped to the known source article for each question.
 | Fixed Window | 1064.2 | 0.9700 | 0.8525 | 0.3267 | 0.8601 |
 | Token Text Splitter | 1216.4 | 0.9500 | 0.8054 | 0.1993 | 0.8408 |
 | Semantic Splitter | 1061.0 | 0.9467 | 0.7766 | 0.1907 | 0.8193 |
-| **Dynamic Semantic** | 1694.5 | **0.9900** | **0.9417** | 0.1987 | **0.9542** |
 
 ### Shared Corpus Index
 
@@ -234,29 +239,32 @@ All chunks from all 100 documents compete in one index.
 | Fixed Window | 1020.8 | 0.9567 | 0.8375 | 0.2940 | 0.8510 |
 | Token Text Splitter | 1213.7 | 0.9067 | 0.7649 | 0.1893 | 0.7999 |
 | Semantic Splitter | 1021.2 | 0.9133 | 0.7397 | 0.1840 | 0.7832 |
-| **Dynamic Semantic** | 1593.5 | **0.9767** | **0.8959** | 0.1967 | **0.9168** |
 
 ### Reading These Numbers
 
-- Dynamic Semantic leads on HR/MRR/NDCG in both modes, but at default params
-  it spends ~55-60% more tokens than Fixed Window, so the project thesis
-  ("same quality for fewer tokens") is not demonstrated at defaults. With
-  per-domain tuning it holds — see the tuned `wiki_100_qa_hard` section
-  below; HR-vs-token budget curves are the next planned step.
+- The four baselines span HR 0.91-0.97 at roughly 1000-1200 tokens; Fixed
+  Window is the strongest quality/cost point and serves as the reference
+  for Dynamic Semantic in the next section.
 - HR differences between the top strategies are within the statistical noise
   at n=300 (95% CI is roughly +/-0.02-0.03); significance testing is planned.
-- Low P@5 for Dynamic Semantic is expected: merged clusters mean fewer,
-  larger retrieved units, which P@5 penalizes regardless of context quality.
 
-## Tuned Results on wiki_100_qa_hard (2026-07-04)
+## Dynamic Semantic Results (Tuned, Dual-Space)
+
+Dual-space clean adjacency is the reference configuration (accepted in
+improvement-plan step P.3; full A/B against phantom adjacency is recorded
+there). Tuning protocol: Optuna 300 trials, document-level 70/30 split,
+hard 1200-token budget:
+
+```bash
+python -m stand tune --dataset <dataset> --embedding bge-small \
+  --adjacency-space clean --hpo-config configs/hpo_clean_adjacency.yaml --n-trials 300
+```
+
+### wiki_100_qa_hard (2026-07-04)
 
 `wiki_100_qa_hard` paraphrases each question away from the answer's lexis
 (285/300 accepted at content-token overlap <= 0.35), removing the lexical
-mirroring that compressed strategy differences on the original set. Dynamic
-Semantic was tuned per-domain (Optuna, 300 trials, document-level 70/30
-split, hard 1200-token budget) in dual-space mode: phantom embeddings for
-query matching, clean sentence embeddings for the expansion adjacency signal
-(`--adjacency-space clean`).
+mirroring that compresses strategy differences on the original set.
 
 | Configuration | Tokens | HR@5 | MRR |
 |---------------|-------:|-----:|----:|
@@ -265,11 +273,11 @@ query matching, clean sentence embeddings for the expansion adjacency signal
 | Fixed Window (best baseline), shared | 1011 | 0.900 | 0.762 |
 | **Dynamic Semantic tuned, shared** | **833** | **0.930** | **0.808** |
 
-With tuned parameters the project thesis holds on the hard dataset in both
-index modes: higher HR/MRR than the strongest baseline at a smaller token
-budget (significance testing via paired bootstrap is the next planned step).
-Full A/B numbers (phantom vs clean adjacency) and the tuning protocol are in
-`docs/improvement_plan.md`, step P.3.
+With tuned parameters the project thesis holds in both index modes: higher
+HR/MRR than the strongest baseline at a smaller token budget (significance
+testing via paired bootstrap is the next planned step). Low P@5 relative to
+baselines is expected and not tracked here: merged clusters mean fewer,
+larger retrieved units, which P@5 penalizes regardless of context quality.
 
 ## Legacy Benchmark Results (Outdated)
 
