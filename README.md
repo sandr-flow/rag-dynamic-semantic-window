@@ -125,7 +125,16 @@ python -m stand run --dataset wiki_100_qa --embedding bge-small --params tuned
 # Tune dynamic_semantic on train documents and report held-out validation metrics
 python -m stand tune --dataset wiki_100_qa --embedding bge-small \
   --phantom-window 1 --train-ratio 0.70 --split-seed 42
+
+# Dual-space tuning: adjacency sims from clean sentence embeddings
+# (search ranges adapted to the clean cosine distribution)
+python -m stand tune --dataset wiki_100_qa_hard --embedding bge-small \
+  --adjacency-space clean --hpo-config configs/hpo_clean_adjacency.yaml
 ```
+
+The tuned artifact records `adjacency_space`, so `stand run --params tuned`
+reproduces the space automatically. For one-off A/B runs use
+`--dynamic-overrides '{"adjacency_space": "clean"}'`.
 
 Index modes:
 
@@ -231,13 +240,36 @@ All chunks from all 100 documents compete in one index.
 
 - Dynamic Semantic leads on HR/MRR/NDCG in both modes, but at default params
   it spends ~55-60% more tokens than Fixed Window, so the project thesis
-  ("same quality for fewer tokens") is not demonstrated yet. Re-tuning
-  (default thresholds never worked in the old retrieval path) and HR-vs-token
-  budget curves are the next planned steps.
+  ("same quality for fewer tokens") is not demonstrated at defaults. With
+  per-domain tuning it holds — see the tuned `wiki_100_qa_hard` section
+  below; HR-vs-token budget curves are the next planned step.
 - HR differences between the top strategies are within the statistical noise
   at n=300 (95% CI is roughly +/-0.02-0.03); significance testing is planned.
 - Low P@5 for Dynamic Semantic is expected: merged clusters mean fewer,
   larger retrieved units, which P@5 penalizes regardless of context quality.
+
+## Tuned Results on wiki_100_qa_hard (2026-07-04)
+
+`wiki_100_qa_hard` paraphrases each question away from the answer's lexis
+(285/300 accepted at content-token overlap <= 0.35), removing the lexical
+mirroring that compressed strategy differences on the original set. Dynamic
+Semantic was tuned per-domain (Optuna, 300 trials, document-level 70/30
+split, hard 1200-token budget) in dual-space mode: phantom embeddings for
+query matching, clean sentence embeddings for the expansion adjacency signal
+(`--adjacency-space clean`).
+
+| Configuration | Tokens | HR@5 | MRR |
+|---------------|-------:|-----:|----:|
+| Fixed Window (best baseline), per-document | 1054 | 0.930 | 0.803 |
+| **Dynamic Semantic tuned, per-document** | **931** | **0.967** | **0.852** |
+| Fixed Window (best baseline), shared | 1011 | 0.900 | 0.762 |
+| **Dynamic Semantic tuned, shared** | **833** | **0.930** | **0.808** |
+
+With tuned parameters the project thesis holds on the hard dataset in both
+index modes: higher HR/MRR than the strongest baseline at a smaller token
+budget (significance testing via paired bootstrap is the next planned step).
+Full A/B numbers (phantom vs clean adjacency) and the tuning protocol are in
+`docs/improvement_plan.md`, step P.3.
 
 ## Legacy Benchmark Results (Outdated)
 

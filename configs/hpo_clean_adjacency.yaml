@@ -1,0 +1,16 @@
+# Search space for tuning with --adjacency-space clean.
+#
+# Thresholds: clean-space adjacency cosines on wiki_100_qa_hard + bge-small
+# are p1=0.375 p5=0.432 p25=0.527 p50=0.603 p75=0.682 p95=0.789 p99=0.867.
+# The default range (0.5-0.99) starts at ~p22 and wastes half its width
+# above p99, so thresholds are searched over 0.30-0.90 instead.
+#
+# Windows: same widening as configs/hpo_phantom_adjacency.yaml — the stock
+# ranges (min_window 1-5, max_expand 3-10) cannot reach the economical
+# region below the 1200-token wall, and both spaces must search the same
+# structural window ranges for a fair A/B.
+search_space:
+  threshold: [0.30, 0.90]
+  skip_threshold: [0.30, 0.90]
+  min_window: [0, 5]
+  max_expand: [1, 10]
