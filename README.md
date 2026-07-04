@@ -1,225 +1,228 @@
 # Dynamic Semantic Window RAG
 
-Experimental RAG retrieval strategy using dynamic context window expansion based on semantic similarity.
+Experimental RAG retrieval benchmark for comparing fixed chunking with a
+dynamic semantic window expansion strategy.
 
-> **Active Experiment**: This project is under active development. Results and configurations may change.
+The project is organized around a small benchmark stand:
 
-## Table of Contents
-
-- [Background](#background)
-- [Installation](#installation)
-- [Usage](#usage)
-- [Configuration](#configuration)
-- [Benchmark Results](#benchmark-results)
-- [License](#license)
+- prepare reusable dataset and embedding artifacts once;
+- run comparable retrieval strategies against the same questions;
+- save machine-readable results under `results/`.
 
 ## Background
 
-Traditional RAG chunking methods use fixed-size windows, which can split related context or include irrelevant text. This project explores **dynamic semantic window expansion**: starting from a seed sentence and expanding the context window based on cosine similarity with neighboring sentences.
+Traditional RAG chunking uses fixed-size text windows. That is simple and often
+strong for recall, but it can include redundant context or split semantically
+connected passages.
 
-### Key Features
+This project tests `dynamic_semantic`: a retrieval strategy that starts from
+seed sentences and expands context according to local semantic similarity,
+query relevance, and expansion thresholds.
 
-- **Phantom Embeddings**: Embeddings computed using surrounding context for better semantic representation
-- **Two-Pass Retrieval**: Broad initial search (`top_k * multiplier`), then refined expansion
-- **Adaptive Thresholds**: Dynamic expansion based on local density and gradient detection
-- **Query-Aware Expansion**: Considers both neighbor similarity and query relevance
+### Strategy Under Test
+
+`dynamic_semantic` is designed to retrieve compact, semantically coherent
+context. The current implementation focuses on:
+
+- phantom embeddings computed with surrounding context;
+- two-pass retrieval: broad candidate search followed by refined expansion;
+- adaptive expansion based on local similarity signals;
+- query-aware filtering while expanding neighboring sentences.
+
+The main comparison point is whether this strategy can keep ranking quality high
+while reducing tokens returned to the downstream LLM.
 
 ## Installation
 
-### Prerequisites
+### Requirements
 
-- Python 3.12+ recommended; the current local venv was recreated with Python 3.14.4
-- API key for QA generation when using remote LLM providers
+- Python 3.12+
+- Optional API keys for dataset QA generation or remote embedding/LLM providers
+- Network access for fetching Wikipedia/QASPER data and downloading local
+  Hugging Face embedding models when they are not cached
 
-### Steps
+### Setup
 
 ```bash
-# Clone repository
 git clone https://github.com/your-username/rag-dynamic-semantic-window.git
 cd rag-dynamic-semantic-window
 
-# Create virtual environment
-py -3.14 -m venv .venv  # Windows, when Python 3.14 is installed
-# python -m venv .venv
+python -m venv .venv
 .venv\Scripts\activate  # Windows
-# source .venv/bin/activate  # Linux/Mac
+# source .venv/bin/activate  # Linux/macOS
 
-# Install dependencies
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install -r requirements.txt
 
-# Optional: install local test/lint tools
+# Optional development tools
 python -m pip install -r requirements-dev.txt
 ```
 
-## Usage
-
-The benchmark stand has two layers:
-
-- **Prep** (heavy, run once): build reusable artifacts on disk — datasets,
-  embedding registrations, and per-domain tuned hyperparameters.
-- **Run** (light): pick from prepared artifacts and benchmark one combination.
-
-Install the console command once (optional):
+Install the local console command if desired:
 
 ```bash
 python -m pip install -e .
 ```
 
-### Interactive menu (primary entry point)
+## Usage
 
-Run with no arguments to pick a prepared dataset, an embedding model, a strategy
-set, an index mode, and (if available) tuned params from a console menu:
+The benchmark stand has two stages.
 
-```bash
-python -m stand
-# or, if installed: stand
-```
+### 1. Prepare Artifacts
 
-The menu only offers artifacts that already exist. Prepare them first with the
-commands below.
-
-### Prepare datasets and embeddings
-
-Datasets are fetched/labeled once and reused. The QA-generation model is part of
-a dataset's identity, so different QA models produce different datasets.
+Datasets are fetched and labeled once, then saved under
+`artifacts/datasets/<name>/`. Embedding registrations and tuned params are also
+saved under `artifacts/`.
 
 ```bash
-# QASPER scientific papers, questions generated with Mistral
+# Wikipedia dataset with generated QA pairs
+python -m stand prepare-dataset --source wikipedia --name wiki_100_qa \
+  --num-articles 100 --min-length 6000 --questions-per-article 3 \
+  --qa-provider openai --qa-model gpt-5.4-nano
+
+# QASPER scientific papers
 python -m stand prepare-dataset --source qasper --name qasper_val \
   --num-articles 30 --questions-per-article 3 --qa-provider mistral
 
-# Wikipedia, questions generated with OpenRouter
-python -m stand prepare-dataset --source wikipedia --name wiki_30 \
-  --num-articles 30 --min-length 6000 --qa-provider openrouter --qa-model openai/gpt-4.1-mini
-
-# A pre-labeled custom dataset (no QA generation, no network)
+# Pre-labeled custom JSONL dataset
 python -m stand prepare-dataset --source custom --name my_set \
   --dataset-path data/custom_benchmark.jsonl
 
-# Register an embedding model (downloads/warms HF weights, or validates an API model)
-python -m stand prepare-embedding --name bge-base --provider huggingface --model BAAI/bge-base-en-v1.5
+# Register or warm an embedding model
+python -m stand prepare-embedding --name bge-base \
+  --provider huggingface --model BAAI/bge-base-en-v1.5
 ```
 
-`mock` (offline, `mock:384`) and `bge-small` (local `BAAI/bge-small-en-v1.5`)
-are always available without preparing anything.
+Built-in embeddings:
 
-### Tune the dynamic strategy per domain
+- `mock`: offline smoke-test embeddings, not meaningful for retrieval quality;
+- `bge-small`: local Hugging Face model `BAAI/bge-small-en-v1.5`.
 
-The core hypothesis: `dynamic_semantic` hyperparameters should be tuned per
-domain. Tuning is keyed by `(dataset, embedding)` and saved as a reusable
-`tuned` artifact. The sentence/question embeddings are cached so re-tuning is fast.
-
-```bash
-python -m stand tune --dataset qasper_val --embedding bge-small --n-trials 200
-```
-
-### Run a benchmark non-interactively (CI / reproducibility)
-
-The same in-process runner the menu uses, driven by flags:
-
-```bash
-# Offline smoke with mock embeddings
-python -m stand run --dataset my_set --embedding mock --strategies naive,dynamic_semantic
-
-# Compare per-document vs shared-corpus indexing
-python -m stand run --dataset qasper_val --embedding bge-small --index-mode shared
-
-# Apply the tuned dynamic params for this domain
-python -m stand run --dataset qasper_val --embedding bge-small --params tuned
-```
-
-Index modes:
-
-- `per_document` — chunks of each document go into their own collection; retrieval
-  is scoped to that document.
-- `shared` — chunks of all documents go into one collection; retrieval competes
-  across the whole corpus (closer to real RAG, harder).
-
-Each run prints a metrics table and saves a result JSON under `results/`.
-
-### Inspect what is prepared
+Inspect available artifacts:
 
 ```bash
 python -m stand list
 ```
 
-### Strategy ids
-
-- `naive` — LlamaIndex `SentenceSplitter`
-- `fixed_window` — LlamaIndex `SentenceWindowNodeParser`
-- `token_text` — LlamaIndex `TokenTextSplitter`
-- `semantic_splitter` — LlamaIndex `SemanticSplitterNodeParser`
-- `dynamic_semantic` — the custom dynamic semantic window strategy (the one under test)
-
-Only text strategies are supported, so `default` and `all` are equivalent.
-
-### Custom dataset format
-
-Combined JSONL (one document per line):
-
-```jsonl
-{"title": "Doc", "text": "Alpha beta. Gamma delta.", "qa_pairs": [{"question": "What starts the doc?", "answer_sentence": "Alpha beta."}]}
-```
-
-### Quality gates
+### 2. Run Benchmarks
 
 ```bash
-python -m pytest tests
-python -m ruff check .
+# Per-document retrieval: each article has its own index
+python -m stand run --dataset wiki_100_qa --embedding bge-small \
+  --index-mode per_document --params default
+
+# Shared retrieval: all documents compete in one corpus-wide index
+python -m stand run --dataset wiki_100_qa --embedding bge-small \
+  --index-mode shared --params default
+
+# Run only selected strategies
+python -m stand run --dataset wiki_100_qa --embedding bge-small \
+  --strategies fixed_window,dynamic_semantic --index-mode shared
+
+# Use tuned dynamic_semantic params when an artifact exists
+python -m stand run --dataset wiki_100_qa --embedding bge-small --params tuned
 ```
+
+Index modes:
+
+- `per_document`: chunks from each document are indexed separately; retrieval is
+  scoped to the source document for each question. This isolates chunking and
+  expansion behavior.
+- `shared`: chunks from all documents go into one index. Retrieval competes
+  across the whole corpus and is closer to production RAG.
+
+Each run prints a metrics table and writes a result JSON under `results/`.
+
+### Strategy IDs
+
+- `naive`: LlamaIndex `SentenceSplitter`
+- `fixed_window`: LlamaIndex `SentenceWindowNodeParser`
+- `token_text`: LlamaIndex `TokenTextSplitter`
+- `semantic_splitter`: LlamaIndex `SemanticSplitterNodeParser`
+- `dynamic_semantic`: custom dynamic semantic window strategy
+
+### Dataset Format
+
+Combined JSONL, one document per line:
+
+```jsonl
+{"title": "Doc", "text": "Alpha beta. Gamma delta.", "qa_pairs": [{"question": "What starts the doc?", "answer": "Alpha beta", "answer_sentence": "Alpha beta."}]}
+```
+
+The evaluator uses exact normalized substring matching against
+`answer_sentence`.
 
 ## Configuration
 
-Create `.env` file based on `.env.example`:
+Create `.env` with the provider settings you use.
 
 | Variable | Description | Required |
 |----------|-------------|----------|
 | `MISTRAL_API_KEY` | Mistral API key for QA generation or embeddings | If using Mistral |
 | `OPENAI_API_KEY` | OpenAI API key | If using OpenAI |
 | `OPENROUTER_API_KEY` | OpenRouter API key | If using OpenRouter |
-| `EMBEDDING_PROVIDER` | Embedding provider id | No |
-| `EMBEDDING_MODEL` | Embedding model | No |
-| `EMBEDDING_BASE_URL` | OpenAI-compatible base URL for custom embedding providers | If custom embedding |
-| `LLM_PROVIDER` | QA-generation provider id | No |
-| `LLM_MODEL` | QA-generation model | No |
-| `LLM_BASE_URL` | OpenAI-compatible base URL for custom providers | No |
-| `QA_GENERATION_DELAY` | Delay between QA-generation provider calls | No |
+| `EMBEDDING_PROVIDER` | Default embedding provider id | No |
+| `EMBEDDING_MODEL` | Default embedding model | No |
+| `EMBEDDING_API_KEY_ENV` | Env var name containing the embedding API key | No |
+| `EMBEDDING_BASE_URL` | OpenAI-compatible embedding base URL | If custom |
+| `LLM_PROVIDER` | Default QA-generation provider id | No |
+| `LLM_MODEL` | Default QA-generation model | No |
+| `LLM_API_KEY_ENV` | Env var name containing the LLM API key | No |
+| `LLM_BASE_URL` | OpenAI-compatible LLM base URL | If custom |
+| `QA_GENERATION_DELAY` | Delay between QA-generation calls | No |
 
-Use `EMBEDDING_PROVIDER=mock` and `EMBEDDING_MODEL=mock:384` only for infrastructure smoke
-tests. It avoids model downloads/API calls but does not produce meaningful retrieval quality metrics.
+Use `mock/mock:384` only for infrastructure smoke tests.
 
-## Benchmark Results
+## Current Benchmark Results
 
-### Wikipedia (2026-01-20)
+Dataset: `wiki_100_qa`
 
-199 articles, 581 questions, min_length=6000
+- Source: English Wikipedia
+- 100 articles
+- 300 generated QA pairs
+- QA model: `openai/gpt-5.4-nano`
+- Embedding: `BAAI/bge-small-en-v1.5`
+- `top_k=5`, `metric_k=5`
+- Dynamic params: default
 
-| Strategy | Tokens | HR@5 | MRR | NDCG |
-|----------|--------|------|-----|------|
-| Naive Chunking | 588 | 0.91 | 0.74 | 0.79 |
-| Fixed Window | 1158 | 0.93 | 0.75 | 0.78 |
-| Semantic Splitter | 1226 | 0.92 | 0.74 | 0.79 |
-| **Dynamic Semantic** | **655** | **0.95** | **0.87** | **0.89** |
+Result files:
 
-### QASPER (2026-01-20)
+- `results/benchmark_wiki_100_qa_per_document_20260704_012042.json`
+- `results/benchmark_wiki_100_qa_shared_20260704_022407.json`
 
-30 articles, 89 questions, min_length=4000
+### Per-Document Index
 
-| Strategy | Tokens | HR@5 | MRR | NDCG |
-|----------|--------|------|-----|------|
-| Naive Chunking | 667 | 0.67 | 0.50 | 0.54 |
-| Fixed Window | 1336 | 0.85 | 0.65 | 0.68 |
-| Semantic Splitter | 1390 | 0.69 | 0.46 | 0.51 |
-| **Dynamic Semantic** | **766** | **0.75** | **0.65** | **0.68** |
+Retrieval is scoped to the known source article for each question.
 
-### Key Observations
+| Strategy | Tokens | HR@5 | MRR | P@5 | NDCG@5 |
+|----------|-------:|-----:|----:|----:|-------:|
+| Naive Chunking | 1207.9 | 0.9733 | 0.8294 | 0.2060 | 0.8648 |
+| Fixed Window | 1153.4 | 0.9700 | 0.8525 | 0.3267 | 0.8601 |
+| Token Text Splitter | 1353.7 | 0.9433 | 0.8004 | 0.1967 | 0.8358 |
+| Semantic Splitter | 1176.8 | 0.9433 | 0.7733 | 0.1900 | 0.8159 |
+| **Dynamic Semantic** | **614.5** | **0.9633** | **0.8847** | **0.1940** | **0.9050** |
 
-- **Wikipedia**: Dynamic Semantic achieves best MRR (0.87) with 15% fewer tokens than Fixed Window
-- **QASPER**: Dynamic Semantic matches Fixed Window MRR with 43% fewer tokens
-- Scientific papers are more challenging due to technical terminology and complex structure
+### Shared Corpus Index
+
+All chunks from all 100 documents compete in one index.
+
+| Strategy | Tokens | HR@5 | MRR | P@5 | NDCG@5 |
+|----------|-------:|-----:|----:|----:|-------:|
+| Naive Chunking | 1208.9 | 0.9200 | 0.7888 | 0.1933 | 0.8214 |
+| Fixed Window | 1100.6 | 0.9567 | 0.8375 | 0.2940 | 0.8510 |
+| Token Text Splitter | 1347.3 | 0.9000 | 0.7599 | 0.1867 | 0.7948 |
+| Semantic Splitter | 1136.0 | 0.9100 | 0.7363 | 0.1833 | 0.7799 |
+| **Dynamic Semantic** | **627.2** | **0.9400** | **0.8494** | **0.1893** | **0.8727** |
+
+## Development
+
+Run tests and linting:
+
+```bash
+python -m pytest tests
+python -m ruff check .
+```
 
 ## License
 
 MIT
-
