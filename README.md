@@ -273,11 +273,41 @@ mirroring that compresses strategy differences on the original set.
 | Fixed Window (best baseline), shared | 1011 | 0.900 | 0.762 |
 | **Dynamic Semantic tuned, shared** | **833** | **0.930** | **0.808** |
 
-With tuned parameters the project thesis holds in both index modes: higher
-HR/MRR than the strongest baseline at a smaller token budget (significance
-testing via paired bootstrap is the next planned step). Low P@5 relative to
-baselines is expected and not tracked here: merged clusters mean fewer,
-larger retrieved units, which P@5 penalizes regardless of context quality.
+Result files:
+
+- `results/benchmark_wiki_100_qa_hard_per_document_20260704_231808.json`
+- `results/benchmark_wiki_100_qa_hard_shared_20260704_232244.json`
+
+### wiki_100_qa (2026-07-04)
+
+Same tuning protocol on the original (non-paraphrased) dataset. Questions
+lexically mirror answers here, so absolute numbers are higher for every
+strategy and differences are compressed (see the ceiling analysis in
+improvement-plan step P.1).
+
+| Configuration | Tokens | HR@5 | MRR |
+|---------------|-------:|-----:|----:|
+| Fixed Window, per-document | 1064 | 0.970 | 0.853 |
+| **Dynamic Semantic tuned, per-document** | **1031** | **0.987** | **0.905** |
+| Fixed Window, shared | 1021 | 0.957 | 0.838 |
+| **Dynamic Semantic tuned, shared** | **904** | **0.973** | **0.877** |
+
+Tuned dynamic beats every baseline in both modes (the best baseline HR is
+Naive Chunking's 0.9733 per-document at 1080 tokens), while staying below
+every baseline's token budget.
+
+Result files:
+
+- `results/benchmark_wiki_100_qa_per_document_20260704_235149.json`
+- `results/benchmark_wiki_100_qa_shared_20260704_235638.json`
+
+### Reading the Tuned Numbers
+
+The project thesis holds on both datasets in both index modes: higher HR/MRR
+than the strongest baseline at a smaller token budget (significance testing
+via paired bootstrap is the next planned step). Low P@5 relative to baselines
+is expected and not tracked here: merged clusters mean fewer, larger
+retrieved units, which P@5 penalizes regardless of context quality.
 
 ## Legacy Benchmark Results (Outdated)
 
