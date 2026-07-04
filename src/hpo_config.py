@@ -24,14 +24,61 @@ class ParameterSpec:
 
 @dataclass
 class ObjectivePolicy:
-    """Scoring policy for cached dynamic semantic HPO."""
+    """Scoring policy for cached dynamic semantic HPO.
+
+    Above ``soft_token_limit`` a hard wall applies (see
+    :func:`compute_objective_score`). Below it the score is
+    ``HR*hr_weight + MRR*mrr_weight + token_bonus``. When
+    ``token_tiebreak_fraction > 0`` the token bonus is scaled so its maximum
+    possible value is that fraction of one HR question's worth
+    (``hr_weight / num_valid_questions``). Because the fraction is < 1, token
+    savings can never outweigh even a single caught question: the objective is
+    HR first, token savings as a strict sub-HR tie-breaker, MRR last. Set the
+    fraction to 0 to fall back to the static ``token_bonus_weight`` (legacy).
+    """
 
     soft_token_limit: int = 1200
     hr_weight: float = 100.0
     mrr_weight: float = 0.01
     token_bonus_weight: float = 0.0
+    token_tiebreak_fraction: float = 0.5
     token_penalty_per_token: float = 0.01
     invalid_score: float = -9999.0
+
+    def token_bonus_weight_for(self, num_valid_questions: int) -> float:
+        """Effective per-unit weight of the normalized token-savings bonus."""
+        if self.token_tiebreak_fraction > 0 and num_valid_questions > 0:
+            return self.token_tiebreak_fraction * self.hr_weight / num_valid_questions
+        return self.token_bonus_weight
+
+
+def compute_objective_score(
+    *,
+    avg_hr: float,
+    avg_mrr: float,
+    avg_tokens: float,
+    num_valid_questions: int,
+    policy: ObjectivePolicy,
+) -> tuple[float, bool]:
+    """Objective score for one config, plus whether it respected the budget.
+
+    Hard wall: an over-budget config scores below ``invalid_score`` by its
+    excess, so it is strictly worse than any in-budget config while still
+    ordered by how far over it is. In budget: HR dominates, token savings act
+    as a sub-HR tie-breaker, MRR breaks remaining ties.
+    """
+    tokens_ok = avg_tokens <= policy.soft_token_limit
+    if not tokens_ok:
+        return policy.invalid_score - (avg_tokens - policy.soft_token_limit), False
+
+    score = avg_hr * policy.hr_weight + avg_mrr * policy.mrr_weight
+    bonus_weight = policy.token_bonus_weight_for(num_valid_questions)
+    if bonus_weight and policy.soft_token_limit > 0:
+        token_bonus = (
+            (policy.soft_token_limit - avg_tokens) / policy.soft_token_limit * bonus_weight
+        )
+        score += token_bonus
+    return score, True
 
 
 @dataclass

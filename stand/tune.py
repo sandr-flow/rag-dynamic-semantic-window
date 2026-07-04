@@ -11,6 +11,7 @@ computed once into a cached corpus and reused across trials and re-tunes.
 from __future__ import annotations
 
 import pickle
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -193,6 +194,7 @@ def tune(
     phantom_window: int = DEFAULT_DYNAMIC_SEMANTIC_CONFIG.phantom_window,
     train_ratio: float = 0.70,
     split_seed: int = 42,
+    hpo_config: str | None = None,
 ) -> dict:
     """Run per-domain Optuna HPO and save a tuned-params artifact."""
     try:
@@ -224,7 +226,7 @@ def tune(
             "answer sentence (documents may be too short for the min-sentence floor). "
             "Tune on a larger dataset (e.g. qasper/wikipedia)."
         )
-    hpo_settings = load_hpo_settings(soft_token_limit=soft_token_limit)
+    hpo_settings = load_hpo_settings(path=hpo_config, soft_token_limit=soft_token_limit)
 
     print(
         f"\n[INFO] Running {n_trials} Optuna trials for {dataset} + {embedding} "
@@ -272,6 +274,11 @@ def tune(
             "phantom_window": phantom_window,
             "train_articles": len(train_corpus.articles),
             "val_articles": len(val_corpus.articles),
+            # Scoring policy: hard token wall at soft_token_limit (an aligned
+            # budget vs the fixed-window baseline), HR first, token savings a
+            # strict sub-HR tie-breaker, MRR last. See ObjectivePolicy.
+            "objective": asdict(hpo_settings.objective),
+            "hpo_config": hpo_config,
         },
     )
 

@@ -30,7 +30,12 @@ except ImportError:
 from src.config import DEFAULT_CORPUS_CONFIG, DEFAULT_EXPANSION_CONFIG, DEFAULT_OPTUNA_CONFIG
 from src.corpus_data import CorpusData
 from src.expansion_core import DynamicExpansionCore, build_garbage_mask, evaluate_retrieval
-from src.hpo_config import HPOSettings, load_hpo_settings, suggest_params
+from src.hpo_config import (
+    HPOSettings,
+    compute_objective_score,
+    load_hpo_settings,
+    suggest_params,
+)
 
 
 def parse_args():
@@ -227,20 +232,13 @@ def evaluate_params(
     avg_mrr = total_mrr / num_valid_questions
     avg_tokens = total_tokens / len(corpus.questions) if corpus.questions else 0
 
-    tokens_ok = avg_tokens <= objective_policy.soft_token_limit
-    if not tokens_ok:
-        excess = avg_tokens - objective_policy.soft_token_limit
-        score = objective_policy.invalid_score - excess
-    else:
-        score = avg_hr * objective_policy.hr_weight
-        score += avg_mrr * objective_policy.mrr_weight
-        if objective_policy.token_bonus_weight:
-            token_bonus = (
-                (objective_policy.soft_token_limit - avg_tokens)
-                / objective_policy.soft_token_limit
-                * objective_policy.token_bonus_weight
-            )
-            score += token_bonus
+    score, tokens_ok = compute_objective_score(
+        avg_hr=avg_hr,
+        avg_mrr=avg_mrr,
+        avg_tokens=avg_tokens,
+        num_valid_questions=num_valid_questions,
+        policy=objective_policy,
+    )
 
     return {
         "score": score,

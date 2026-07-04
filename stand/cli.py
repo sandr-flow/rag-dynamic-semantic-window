@@ -85,6 +85,7 @@ def _cmd_tune(args: argparse.Namespace) -> int:
         phantom_window=args.phantom_window,
         train_ratio=args.train_ratio,
         split_seed=args.split_seed,
+        hpo_config=args.hpo_config,
     )
     return 0
 
@@ -145,6 +146,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_tune.add_argument("--phantom-window", type=int, default=1)
     p_tune.add_argument("--train-ratio", type=float, default=0.70)
     p_tune.add_argument("--split-seed", type=int, default=42)
+    p_tune.add_argument(
+        "--hpo-config",
+        default=None,
+        help="YAML/JSON file with search_space and objective policy overrides.",
+    )
 
     p_run = sub.add_parser("run", help="Run one combination non-interactively.")
     p_run.add_argument("--dataset", required=True)
