@@ -157,6 +157,59 @@ def test_tune_corpus_uses_phantom_embedding_texts():
     assert embed_model.batch_calls == 2
 
 
+def test_tune_corpus_clean_adjacency_uses_second_batch():
+    from stand.tune import _build_corpus, _neighbor_sims
+
+    class RecordingEmbedding:
+        def __init__(self):
+            self.batches: list[list[str]] = []
+
+        def get_text_embedding(self, text):
+            return [float(len(text)), 1.0, 0.0]
+
+        def get_text_embedding_batch(self, texts, **kwargs):
+            self.batches.append(list(texts))
+            return [self.get_text_embedding(text) for text in texts]
+
+    sentences = [f"Sentence {i} has enough content padded {'x' * i}." for i in range(10)]
+    item = {
+        "title": "Doc",
+        "text": " ".join(sentences),
+        "qa_pairs": [
+            {"question": "Which sentence?", "answer_sentence": sentences[5]},
+        ],
+    }
+    embed_model = RecordingEmbedding()
+
+    corpus = _build_corpus(
+        [item],
+        embed_model,
+        source="mini",
+        embedding_provider="mock",
+        embedding_model="mock:3",
+        phantom_window=1,
+        adjacency_space="clean",
+    )
+
+    # Three batches: phantom texts, clean sentences, questions.
+    assert len(embed_model.batches) == 3
+    assert embed_model.batches[1] == sentences
+    assert corpus.embedding_mode == "phantom_w1__adj_clean"
+    assert corpus.adjacency_space == "clean"
+
+    clean_matrix = np.array(
+        [[float(len(s)), 1.0, 0.0] for s in sentences], dtype=np.float32
+    )
+    np.testing.assert_allclose(
+        corpus.articles[0].neighbor_sims, _neighbor_sims(clean_matrix), rtol=1e-6
+    )
+    # Question sims still live in phantom space (matrix of phantom embeddings).
+    phantom_matrix = np.array(
+        [[float(len(t)), 1.0, 0.0] for t in embed_model.batches[0]], dtype=np.float32
+    )
+    np.testing.assert_allclose(corpus.articles[0].embeddings, phantom_matrix, rtol=1e-6)
+
+
 def test_corpus_document_split_keeps_article_boundaries():
     from src.corpus_data import ArticleData, CorpusData, QuestionData, split_corpus_by_documents
 
@@ -310,6 +363,40 @@ def test_runner_seeds_only_overrides(temp_artifacts):
     assert row["strategy"] == "Dynamic Semantic"
     full_doc_tokens = count_tokens(items[0]["text"])
     assert 0 < row["tokens"] < full_doc_tokens
+
+
+def test_runner_clean_adjacency_override(temp_artifacts):
+    """adjacency_space=clean runs end to end and is recorded in the result."""
+    from stand.runner import run
+
+    items = [
+        {
+            "title": "Dual",
+            "text": (
+                "Phantom embeddings blend neighboring sentences together. "
+                "Clean embeddings keep each sentence isolated. "
+                "Adjacency signals decide how far expansion walks. "
+                "Dual space separates the two roles cleanly."
+            ),
+            "qa_pairs": [
+                {"question": "What decides how far expansion walks?",
+                 "answer_sentence": "Adjacency signals decide how far expansion walks."},
+            ],
+        }
+    ]
+    artifacts.save_dataset("mini_dual", items, source="custom", qa_model="custom")
+
+    config = RunConfig(
+        dataset="mini_dual",
+        embedding="mock",
+        strategies=["dynamic_semantic"],
+        top_k=3,
+        dynamic_overrides={"adjacency_space": "clean"},
+    )
+    result = run(config, verbose=False)
+
+    assert result["config"]["dynamic_overrides"] == {"adjacency_space": "clean"}
+    assert result["summary"][0]["strategy"] == "Dynamic Semantic"
 
 
 def test_document_metadata_is_excluded_from_embed_content():

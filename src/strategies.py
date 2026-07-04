@@ -238,6 +238,11 @@ class DynamicSemanticStrategy(BaseStrategy):
         self.expansion_config = expansion_config or DEFAULT_EXPANSION_CONFIG
         self.phantom_window = self.dynamic_config.phantom_window
         self.prefetch_multiplier = self.dynamic_config.prefetch_multiplier
+        self.adjacency_space = self.dynamic_config.adjacency_space
+        if self.adjacency_space not in {"phantom", "clean"}:
+            raise ValueError(
+                f"adjacency_space must be 'phantom' or 'clean', got '{self.adjacency_space}'"
+            )
         super().__init__(documents, top_k)
 
     @property
@@ -249,6 +254,7 @@ class DynamicSemanticStrategy(BaseStrategy):
         nodes = []
         doc_ids = []
         all_embedding_texts: list[str] = []
+        all_sentences: list[str] = []
         used_doc_ids: set[str] = set()
         embed_model = Settings.embed_model
 
@@ -271,6 +277,7 @@ class DynamicSemanticStrategy(BaseStrategy):
 
             nodes.extend(doc_nodes)
             doc_ids.extend([doc_id] * len(doc_sentences))
+            all_sentences.extend(doc_sentences)
             # Phantom contexts never cross document boundaries
             all_embedding_texts.extend(
                 build_embedding_texts(doc_sentences, self.phantom_window)
@@ -281,6 +288,15 @@ class DynamicSemanticStrategy(BaseStrategy):
         for node, embedding in zip(nodes, embeddings, strict=True):
             node.embedding = embedding
 
+        # Dual-space mode: adjacency sims come from clean sentence embeddings
+        # while the index and query path stay on phantom embeddings. With
+        # phantom_window=0 both spaces coincide, so no second batch is needed.
+        adjacency_matrix = None
+        if self.adjacency_space == "clean" and self.phantom_window > 0:
+            adjacency_matrix = np.array(
+                embed_model.get_text_embedding_batch(all_sentences), dtype=np.float32
+            )
+
         # Hand the sentence arrays to the expander before index construction:
         # VectorStoreIndex strips embeddings from the nodes it stores, so the
         # docstore cannot serve as an embedding source afterwards.
@@ -289,6 +305,7 @@ class DynamicSemanticStrategy(BaseStrategy):
             sentences=[node.text for node in nodes],
             node_ids=[node.node_id for node in nodes],
             embeddings=embeddings_matrix,
+            adjacency_embeddings=adjacency_matrix,
             doc_ids=doc_ids,
             target_clusters=self.top_k,
             threshold=self.expansion_config.threshold,

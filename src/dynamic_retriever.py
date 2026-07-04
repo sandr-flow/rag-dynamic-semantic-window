@@ -35,7 +35,13 @@ class DynamicSemanticExpander(BaseNodePostprocessor):
         node_ids: Node ids aligned with ``sentences`` (used to map retrieved
             seeds to positions and to report ``source_nodes`` metadata).
         embeddings: Sentence embeddings aligned with ``sentences``, shape
-            (num_sentences, dim). Normalized internally.
+            (num_sentences, dim). Normalized internally. Serve the query path
+            (``sentence_sims``) and, unless ``adjacency_embeddings`` is given,
+            the neighbor adjacency sims too.
+        adjacency_embeddings: Optional second embedding matrix, same shape,
+            used only for neighbor adjacency sims (dual-space mode: phantom
+            embeddings for the query, clean sentence embeddings for
+            adjacency). When unset, behavior is identical to before.
         query_embedding: Optional externally computed query embedding; when
             unset, the query from ``query_bundle`` is embedded via
             ``Settings.embed_model``. Without either, expansion runs without
@@ -45,6 +51,7 @@ class DynamicSemanticExpander(BaseNodePostprocessor):
     sentences: list[str]
     node_ids: list[str]
     embeddings: np.ndarray
+    adjacency_embeddings: np.ndarray | None = None
     doc_ids: list[str] | None = None
 
     # Expansion parameters (see ExpansionConfig)
@@ -90,14 +97,22 @@ class DynamicSemanticExpander(BaseNodePostprocessor):
             )
         if self.doc_ids is not None and len(self.doc_ids) != len(self.sentences):
             raise ValueError("doc_ids must be aligned with sentences")
-        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-        norms = np.where(norms == 0, 1, norms)
-        normalized = embeddings / norms
+        normalized = self._normalize(embeddings)
+
+        adjacency = normalized
+        if self.adjacency_embeddings is not None:
+            adjacency_embeddings = np.asarray(self.adjacency_embeddings, dtype=np.float32)
+            if adjacency_embeddings.shape != embeddings.shape:
+                raise ValueError(
+                    "adjacency_embeddings must match embeddings shape "
+                    f"{embeddings.shape}, got {adjacency_embeddings.shape}"
+                )
+            adjacency = self._normalize(adjacency_embeddings)
 
         self._normalized = normalized
         self._neighbor_sims = (
-            np.sum(normalized[:-1] * normalized[1:], axis=1)
-            if len(normalized) > 1
+            np.sum(adjacency[:-1] * adjacency[1:], axis=1)
+            if len(adjacency) > 1
             else np.array([], dtype=np.float32)
         )
         self._garbage_mask = build_garbage_mask(self.sentences, self.min_chunk_length)
@@ -107,6 +122,12 @@ class DynamicSemanticExpander(BaseNodePostprocessor):
             dtype=object,
         )
         self._prepared = True
+
+    @staticmethod
+    def _normalize(embeddings: np.ndarray) -> np.ndarray:
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        norms = np.where(norms == 0, 1, norms)
+        return embeddings / norms
 
     def _query_sims(self, query_bundle: QueryBundle | None) -> np.ndarray | None:
         """Query-sentence similarities, or None when no query is available."""

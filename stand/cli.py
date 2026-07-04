@@ -97,6 +97,7 @@ def _cmd_tune(args: argparse.Namespace) -> int:
         soft_token_limit=args.soft_token_limit,
         rebuild_corpus=args.rebuild_corpus,
         phantom_window=args.phantom_window,
+        adjacency_space=args.adjacency_space,
         train_ratio=args.train_ratio,
         split_seed=args.split_seed,
         hpo_config=args.hpo_config,
@@ -183,6 +184,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_tune.add_argument("--soft-token-limit", type=int, default=1200)
     p_tune.add_argument("--rebuild-corpus", action="store_true")
     p_tune.add_argument("--phantom-window", type=int, default=1)
+    p_tune.add_argument(
+        "--adjacency-space",
+        choices=["phantom", "clean"],
+        default="phantom",
+        help="Embedding space for neighbor adjacency sims (dual-space: clean).",
+    )
     p_tune.add_argument("--train-ratio", type=float, default=0.70)
     p_tune.add_argument("--split-seed", type=int, default=42)
     p_tune.add_argument(

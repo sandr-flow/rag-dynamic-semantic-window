@@ -164,12 +164,21 @@ class TokenTextSplitterConfig:
 @dataclass
 class DynamicSemanticConfig:
     """Configuration for Dynamic Semantic strategy (experiment)."""
-    
+
     phantom_window: int = 1
     """Context window for phantom embeddings (0 = disabled)."""
-    
+
     prefetch_multiplier: int = 2
     """Two-pass retrieval: fetch top_k * multiplier, then filter to top_k."""
+
+    adjacency_space: str = "phantom"
+    """Embedding space for neighbor adjacency sims: "phantom" or "clean".
+
+    Phantom texts of adjacent sentences share 2 of 3 sentences at w=1, so
+    phantom-space adjacency cosines are systematically inflated. "clean"
+    computes them from plain sentence embeddings instead; the index and the
+    query-aware path stay phantom either way.
+    """
 
 
 @dataclass

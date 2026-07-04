@@ -17,10 +17,13 @@ class ArticleData:
         title: Article title.
         sentences: List of raw sentence strings.
         embeddings: Sentence embeddings, shape (num_sentences, embed_dim).
+            Built in the corpus embedding mode (phantom texts when
+            phantom_window > 0); serve the question sentence_sims.
         neighbor_sims: Cosine similarity between adjacent sentences,
                        shape (num_sentences-1,). neighbor_sims[i] = cos(S_i, S_{i+1}).
+                       Computed in ``CorpusData.adjacency_space``.
     """
-    
+
     article_id: int
     title: str
     sentences: list[str]
@@ -77,6 +80,7 @@ class CorpusData:
     embedding_model: str = "unknown"
     phantom_window: int = 0
     embedding_mode: str = "sentence"
+    adjacency_space: str = "phantom"
 
 
 def find_answer_sentence_idx(sentences: list[str], answer: str) -> int:
@@ -110,6 +114,7 @@ def subset_corpus_by_article_ids(corpus: CorpusData, article_ids: set[int]) -> C
         embedding_model=corpus.embedding_model,
         phantom_window=corpus.phantom_window,
         embedding_mode=corpus.embedding_mode,
+        adjacency_space=corpus.adjacency_space,
     )
 
 

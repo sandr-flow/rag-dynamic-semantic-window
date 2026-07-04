@@ -89,6 +89,92 @@ def test_expansion_does_not_cross_document_segment_boundary():
 
 
 # ---------------------------------------------------------------------------
+# Dual-space adjacency (P.3): neighbor sims from a separate clean matrix
+# ---------------------------------------------------------------------------
+
+
+def test_adjacency_embeddings_control_expansion_independently():
+    """Uniform 'phantom' embeddings expand fully; orthogonal clean adjacency stops it."""
+    sentences, phantom = _uniform_corpus(12)
+    orthogonal = np.eye(12, 3, dtype=np.float32)  # every adjacent cosine is 0
+
+    expander_default, nodes = _make_expander(
+        sentences, phantom, max_expand=3, min_window=1, threshold=0.5
+    )
+    expander_dual = DynamicSemanticExpander(
+        sentences=sentences,
+        node_ids=[node.node_id for node in nodes],
+        embeddings=phantom,
+        adjacency_embeddings=orthogonal,
+        max_expand=3,
+        min_window=1,
+        threshold=0.5,
+    )
+
+    seed = [NodeWithScore(node=nodes[6], score=0.9)]
+    full = _source_positions(expander_default._postprocess_nodes(seed, None)[0])
+    clipped = _source_positions(expander_dual._postprocess_nodes(seed, None)[0])
+
+    assert sorted(full) == list(range(3, 10))  # phantom-only reaches max_expand
+    assert sorted(clipped) == [5, 6, 7]  # clean adjacency stops at min_window
+
+
+def test_adjacency_embeddings_shape_mismatch_rejected():
+    sentences, phantom = _uniform_corpus(6)
+    expander = DynamicSemanticExpander(
+        sentences=sentences,
+        node_ids=[f"node_{i}" for i in range(6)],
+        embeddings=phantom,
+        adjacency_embeddings=np.ones((5, 3), dtype=np.float32),
+    )
+    with pytest.raises(ValueError, match="adjacency_embeddings"):
+        expander._ensure_prepared()
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_dual_space_adapter_matches_core(seed):
+    """Parity holds when adjacency comes from a second (clean) matrix."""
+    rng = np.random.default_rng(1000 + seed)
+    sentences, phantom, query, params = _random_case(rng)
+    clean = rng.normal(size=phantom.shape).astype(np.float32)
+    clean /= np.linalg.norm(clean, axis=1, keepdims=True)
+
+    neighbor_sims = np.sum(clean[:-1] * clean[1:], axis=1)
+    sentence_sims = phantom @ query
+    order = np.argsort(sentence_sims)[::-1].astype(np.int32)
+
+    core = DynamicExpansionCore(
+        neighbor_sims=neighbor_sims,
+        sentence_sims=sentence_sims,
+        top_k_indices=order,
+        garbage_mask=build_garbage_mask(sentences),
+        **params,
+    )
+    expected = core.expand_and_retrieve()
+
+    nodes = create_sentence_nodes(sentences)
+    expander = DynamicSemanticExpander(
+        sentences=sentences,
+        node_ids=[node.node_id for node in nodes],
+        embeddings=phantom,
+        adjacency_embeddings=clean,
+        query_embedding=query,
+        **params,
+    )
+    seeds = [
+        NodeWithScore(node=nodes[int(pos)], score=float(sentence_sims[pos]))
+        for pos in order[: min(10, len(sentences))]
+    ]
+    result = expander._postprocess_nodes(seeds, None)
+
+    assert len(result) == len(expected)
+    for node_score, cluster in zip(result, expected, strict=True):
+        assert _source_positions(node_score) == list(
+            range(cluster.start_idx, cluster.end_idx + 1)
+        )
+
+
+# ---------------------------------------------------------------------------
 # Parity: adapter (LlamaIndex path) == core (HPO array path)
 # ---------------------------------------------------------------------------
 
