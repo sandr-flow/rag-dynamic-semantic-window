@@ -238,11 +238,6 @@ class DynamicSemanticStrategy(BaseStrategy):
         self.expansion_config = expansion_config or DEFAULT_EXPANSION_CONFIG
         self.phantom_window = self.dynamic_config.phantom_window
         self.prefetch_multiplier = self.dynamic_config.prefetch_multiplier
-        self.adjacency_space = self.dynamic_config.adjacency_space
-        if self.adjacency_space not in {"phantom", "clean"}:
-            raise ValueError(
-                f"adjacency_space must be 'phantom' or 'clean', got '{self.adjacency_space}'"
-            )
         super().__init__(documents, top_k)
 
     @property
@@ -288,11 +283,13 @@ class DynamicSemanticStrategy(BaseStrategy):
         for node, embedding in zip(nodes, embeddings, strict=True):
             node.embedding = embedding
 
-        # Dual-space mode: adjacency sims come from clean sentence embeddings
-        # while the index and query path stay on phantom embeddings. With
-        # phantom_window=0 both spaces coincide, so no second batch is needed.
+        # Dual-space: adjacency sims always come from clean sentence
+        # embeddings, while the index and query path stay on phantom
+        # embeddings (phantom neighbors textually overlap, inflating
+        # adjacency cosines). With phantom_window=0 the spaces coincide,
+        # so no second batch is needed.
         adjacency_matrix = None
-        if self.adjacency_space == "clean" and self.phantom_window > 0:
+        if self.phantom_window > 0:
             adjacency_matrix = np.array(
                 embed_model.get_text_embedding_batch(all_sentences), dtype=np.float32
             )

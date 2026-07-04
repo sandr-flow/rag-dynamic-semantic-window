@@ -31,7 +31,7 @@ def temp_artifacts(tmp_path, monkeypatch):
 def test_runconfig_defaults_and_metric_k():
     config = RunConfig(dataset="d", top_k=7)
     assert config.embedding == "mock"
-    assert config.index_mode == "per_document"
+    assert config.index_mode == "shared"
     assert config.effective_metric_k == 7
     assert "dynamic_semantic" in config.strategies
 
@@ -148,13 +148,13 @@ def test_tune_corpus_uses_phantom_embedding_texts():
         phantom_window=1,
     )
 
-    assert corpus.embedding_mode == "phantom_w1"
+    assert corpus.embedding_mode == "phantom_w1__adj_clean"
     assert corpus.phantom_window == 1
     assert embed_model.texts[0] == f"{sentences[0]} {sentences[1]}"
     assert embed_model.texts[5] == f"{sentences[4]} {sentences[5]} {sentences[6]}"
     assert corpus.questions[0].answer_sentence_idx == 5
-    # One batched call for the article's sentences, one for all questions
-    assert embed_model.batch_calls == 2
+    # Batched calls: phantom texts, clean sentences (adjacency), questions
+    assert embed_model.batch_calls == 3
 
 
 def test_tune_corpus_clean_adjacency_uses_second_batch():
@@ -188,7 +188,6 @@ def test_tune_corpus_clean_adjacency_uses_second_batch():
         embedding_provider="mock",
         embedding_model="mock:3",
         phantom_window=1,
-        adjacency_space="clean",
     )
 
     # Three batches: phantom texts, clean sentences, questions.
@@ -367,40 +366,6 @@ def test_runner_seeds_only_overrides(temp_artifacts):
     assert row["strategy"] == "Dynamic Semantic"
     full_doc_tokens = count_tokens(items[0]["text"])
     assert 0 < row["tokens"] < full_doc_tokens
-
-
-def test_runner_clean_adjacency_override(temp_artifacts):
-    """adjacency_space=clean runs end to end and is recorded in the result."""
-    from stand.runner import run
-
-    items = [
-        {
-            "title": "Dual",
-            "text": (
-                "Phantom embeddings blend neighboring sentences together. "
-                "Clean embeddings keep each sentence isolated. "
-                "Adjacency signals decide how far expansion walks. "
-                "Dual space separates the two roles cleanly."
-            ),
-            "qa_pairs": [
-                {"question": "What decides how far expansion walks?",
-                 "answer_sentence": "Adjacency signals decide how far expansion walks."},
-            ],
-        }
-    ]
-    artifacts.save_dataset("mini_dual", items, source="custom", qa_model="custom")
-
-    config = RunConfig(
-        dataset="mini_dual",
-        embedding="mock",
-        strategies=["dynamic_semantic"],
-        top_k=3,
-        dynamic_overrides={"adjacency_space": "clean"},
-    )
-    result = run(config, verbose=False)
-
-    assert result["config"]["dynamic_overrides"] == {"adjacency_space": "clean"}
-    assert result["summary"][0]["strategy"] == "Dynamic Semantic"
 
 
 def test_document_metadata_is_excluded_from_embed_content():

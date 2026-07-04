@@ -171,15 +171,6 @@ class DynamicSemanticConfig:
     prefetch_multiplier: int = 2
     """Two-pass retrieval: fetch top_k * multiplier, then filter to top_k."""
 
-    adjacency_space: str = "phantom"
-    """Embedding space for neighbor adjacency sims: "phantom" or "clean".
-
-    Phantom texts of adjacent sentences share 2 of 3 sentences at w=1, so
-    phantom-space adjacency cosines are systematically inflated. "clean"
-    computes them from plain sentence embeddings instead; the index and the
-    query-aware path stay phantom either way.
-    """
-
 
 @dataclass
 class RetrievalConfig:
@@ -315,11 +306,16 @@ class OptunaConfig:
     constraint_violation_penalty: float = 1000.0
     """Massive penalty for violating HR/MRR constraints."""
     
-    # Hyperparameter search ranges
-    threshold_range: tuple[float, float] = (0.5, 0.99)
-    skip_threshold_range: tuple[float, float] = (0.5, 0.99)
-    min_window_range: tuple[int, int] = (1, 5)
-    max_expand_range: tuple[int, int] = (3, 10)
+    # Hyperparameter search ranges. Threshold ranges are calibrated to the
+    # clean adjacency-cosine distribution (the only expansion signal since
+    # plan step P.3): on wiki_100_qa_hard + bge-small clean sims span
+    # p1=0.375 .. p99=0.867, so 0.5-0.99 would truncate ~p22 and waste half
+    # its width above p99. Window ranges include the economical region
+    # (min_window 0 / max_expand 1) reachable below realistic token budgets.
+    threshold_range: tuple[float, float] = (0.30, 0.90)
+    skip_threshold_range: tuple[float, float] = (0.30, 0.90)
+    min_window_range: tuple[int, int] = (0, 5)
+    max_expand_range: tuple[int, int] = (1, 10)
     relevance_threshold_pct_range: tuple[float, float] = (0.5, 0.99)
     merge_gap_range: tuple[int, int] = (1, 5)
 

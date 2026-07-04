@@ -52,7 +52,6 @@ STRATEGY_OVERRIDE_KEYS = {
     "dynamic_semantic": [
         "phantom_window",
         "prefetch_multiplier",
-        "adjacency_space",
         "threshold",
         "skip_threshold",
         "relevance_threshold_pct",
@@ -257,7 +256,7 @@ def create_strategy(
         dynamic_config = _replace(
             DEFAULT_DYNAMIC_SEMANTIC_CONFIG,
             overrides,
-            {"phantom_window", "prefetch_multiplier", "adjacency_space"},
+            {"phantom_window", "prefetch_multiplier"},
         )
         expansion_config = _replace(
             DEFAULT_EXPANSION_CONFIG,

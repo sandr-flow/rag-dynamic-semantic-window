@@ -69,9 +69,11 @@ def run_menu() -> int:
 
     strategies = _choose_strategies()
 
-    modes = ["per_document", "shared"]
+    modes = ["shared", "per_document"]
     index_mode = modes[_choose(
-        "Index mode", ["per_document (per-doc collection)", "shared (one corpus collection)"]
+        "Index mode",
+        ["shared (one corpus collection, primary)",
+         "per_document (per-doc collection, diagnostic)"],
     )]
 
     if artifacts.has_tuned(dataset, embedding):

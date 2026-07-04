@@ -35,8 +35,9 @@ class RunConfig:
     strategies: list[str] = field(default_factory=lambda: list(DEFAULT_STRATEGIES))
     """Strategy ids to compare. dynamic_semantic is the strategy under test."""
 
-    index_mode: str = "per_document"
-    """per_document = one collection per doc; shared = one collection for the corpus."""
+    index_mode: str = "shared"
+    """shared = one corpus-wide index (primary mode); per_document = one
+    collection per doc, a diagnostic isolating chunking behavior."""
 
     params: str = "default"
     """default = config.py defaults; tuned = load tuned artifact for (dataset, embedding)."""

@@ -57,19 +57,18 @@ def _build_corpus(
     embedding_provider: str,
     embedding_model: str,
     phantom_window: int,
-    adjacency_space: str = "phantom",
     top_k: int = 100,
     min_sentences: int = 10,
 ) -> CorpusData:
     """Precompute sentence/question embeddings + similarity matrices.
 
-    Question sentence_sims are always computed against the corpus embedding
-    mode (phantom texts when phantom_window > 0). With
-    ``adjacency_space="clean"`` the per-article neighbor_sims come from a
-    second batch of plain sentence embeddings instead — mirroring the live
-    dual-space strategy so the HPO surrogate stays aligned.
+    Question sentence_sims are computed against the corpus embedding mode
+    (phantom texts when phantom_window > 0), while per-article neighbor_sims
+    always come from clean sentence embeddings — mirroring the live
+    dual-space strategy so the HPO surrogate stays aligned. With
+    phantom_window=0 the spaces coincide and no second batch is needed.
     """
-    use_clean_adjacency = adjacency_space == "clean" and phantom_window > 0
+    use_clean_adjacency = phantom_window > 0
     articles: list[ArticleData] = []
     total = len(items)
     log_stride = max(1, total // 10)
@@ -144,32 +143,26 @@ def _build_corpus(
         embedding_provider=embedding_provider,
         embedding_model=embedding_model,
         phantom_window=phantom_window,
-        embedding_mode=_embedding_mode(phantom_window, adjacency_space),
-        adjacency_space="clean" if use_clean_adjacency else "phantom",
+        embedding_mode=_embedding_mode(phantom_window),
+        adjacency_space="clean",
     )
 
 
-def _embedding_mode(phantom_window: int, adjacency_space: str = "phantom") -> str:
+def _embedding_mode(phantom_window: int) -> str:
     """Corpus embedding mode, also the corpus-cache key component.
 
-    With phantom_window=0 the phantom and clean spaces coincide, so the
-    adjacency suffix is only meaningful for phantom modes.
+    The ``__adj_clean`` suffix is kept so corpora built before clean-only
+    adjacency (phantom-adjacency neighbor_sims under the plain
+    ``phantom_wN`` key) are never silently reused. With phantom_window=0
+    the spaces coincide and the suffix is meaningless.
     """
     if phantom_window <= 0:
         return "sentence"
-    mode = f"phantom_w{phantom_window}"
-    if adjacency_space == "clean":
-        mode += "__adj_clean"
-    return mode
+    return f"phantom_w{phantom_window}__adj_clean"
 
 
-def _corpus_cache_path(
-    dataset: str, embedding: str, phantom_window: int, adjacency_space: str
-) -> Path:
-    key = (
-        f"{artifacts.tuned_key(dataset, embedding)}"
-        f"__{_embedding_mode(phantom_window, adjacency_space)}"
-    )
+def _corpus_cache_path(dataset: str, embedding: str, phantom_window: int) -> Path:
+    key = f"{artifacts.tuned_key(dataset, embedding)}__{_embedding_mode(phantom_window)}"
     return paths.CORPUS_CACHE_DIR / f"{key}.pkl"
 
 
@@ -179,9 +172,8 @@ def _load_or_build_corpus(
     *,
     rebuild: bool,
     phantom_window: int,
-    adjacency_space: str,
 ) -> CorpusData:
-    cache_path = _corpus_cache_path(dataset, embedding, phantom_window, adjacency_space)
+    cache_path = _corpus_cache_path(dataset, embedding, phantom_window)
     if cache_path.exists() and not rebuild:
         print(f"[INFO] Reusing cached corpus: {cache_path}")
         with open(cache_path, "rb") as f:
@@ -192,7 +184,7 @@ def _load_or_build_corpus(
     items = artifacts.load_dataset_items(dataset)
     print(
         f"[INFO] Building corpus cache for {dataset} + {embedding} "
-        f"mode={_embedding_mode(phantom_window, adjacency_space)} ({len(items)} docs)..."
+        f"mode={_embedding_mode(phantom_window)} ({len(items)} docs)..."
     )
     corpus = _build_corpus(
         items,
@@ -201,7 +193,6 @@ def _load_or_build_corpus(
         embedding_provider=embedding_config.provider,
         embedding_model=embedding_config.model,
         phantom_window=phantom_window,
-        adjacency_space=adjacency_space,
     )
     paths.CORPUS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     with open(cache_path, "wb") as f:
@@ -244,7 +235,6 @@ def tune(
     soft_token_limit: int = 1200,
     rebuild_corpus: bool = False,
     phantom_window: int = DEFAULT_DYNAMIC_SEMANTIC_CONFIG.phantom_window,
-    adjacency_space: str = DEFAULT_DYNAMIC_SEMANTIC_CONFIG.adjacency_space,
     train_ratio: float = 0.70,
     split_seed: int = 42,
     hpo_config: str | None = None,
@@ -258,17 +248,11 @@ def tune(
     from run_optuna import create_objective, evaluate_params  # reuse exact objective math
     from src.hpo_config import load_hpo_settings
 
-    if adjacency_space not in {"phantom", "clean"}:
-        raise ValueError(
-            f"adjacency_space must be 'phantom' or 'clean', got '{adjacency_space}'"
-        )
-
     corpus = _load_or_build_corpus(
         dataset,
         embedding,
         rebuild=rebuild_corpus,
         phantom_window=phantom_window,
-        adjacency_space=adjacency_space,
     )
     _report_adjacency_distribution(corpus)
     train_corpus, val_corpus = split_corpus_by_documents(
@@ -305,11 +289,6 @@ def tune(
     best = study.best_trial
     params = dict(best.params)
     params["phantom_window"] = phantom_window
-    # Recorded in the tuned params so `stand run --params tuned` rebuilds the
-    # strategy in the same adjacency space the thresholds were tuned for.
-    # getattr: corpus pickles predating dual-space lack the field and are
-    # phantom-adjacency by construction.
-    params["adjacency_space"] = getattr(corpus, "adjacency_space", "phantom")
     metrics_train = evaluate_params(
         train_corpus,
         best.params,
@@ -335,9 +314,8 @@ def tune(
             "split_seed": split_seed,
             "target_clusters": target_clusters,
             "soft_token_limit": soft_token_limit,
-            "embedding_mode": _embedding_mode(phantom_window, adjacency_space),
+            "embedding_mode": _embedding_mode(phantom_window),
             "phantom_window": phantom_window,
-            "adjacency_space": getattr(corpus, "adjacency_space", "phantom"),
             "train_articles": len(train_corpus.articles),
             "val_articles": len(val_corpus.articles),
             # Scoring policy: hard token wall at soft_token_limit (an aligned
