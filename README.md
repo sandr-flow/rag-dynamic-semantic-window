@@ -114,45 +114,37 @@ python -m stand list
 ### 2. Run Benchmarks
 
 ```bash
-# Per-document retrieval: each article has its own index
-python -m stand run --dataset wiki_100_qa --embedding bge-small \
-  --index-mode per_document --params default
+# Shared index (default, primary mode): all documents compete in one
+# corpus-wide index; dynamic_semantic uses per-domain tuned params
+python -m stand run --dataset wiki_100_qa_hard --embedding bge-small --params tuned
 
-# Shared retrieval: all documents compete in one corpus-wide index
-python -m stand run --dataset wiki_100_qa --embedding bge-small \
-  --index-mode shared --params default
+# Per-document index (diagnostic): retrieval scoped to the source article
+python -m stand run --dataset wiki_100_qa_hard --embedding bge-small \
+  --index-mode per_document --params tuned
 
 # Run only selected strategies
-python -m stand run --dataset wiki_100_qa --embedding bge-small \
-  --strategies fixed_window,dynamic_semantic --index-mode shared
-
-# Use tuned dynamic_semantic params when an artifact exists
-python -m stand run --dataset wiki_100_qa --embedding bge-small --params tuned
+python -m stand run --dataset wiki_100_qa_hard --embedding bge-small \
+  --strategies fixed_window,dynamic_semantic
 
 # Tune dynamic_semantic on train documents (held-out validation metrics).
-# Dual-space is the reference setup: adjacency from clean sentence
-# embeddings, threshold search ranges adapted to the clean distribution.
-python -m stand tune --dataset wiki_100_qa_hard --embedding bge-small \
-  --adjacency-space clean --hpo-config configs/hpo_clean_adjacency.yaml
+# The expansion adjacency signal always comes from clean sentence
+# embeddings; default search ranges are calibrated to that distribution.
+python -m stand tune --dataset wiki_100_qa_hard --embedding bge-small
 
 # Paired bootstrap CIs (dHR/dMRR vs baselines) for saved results; baseline
 # rows may come from a second file of the same dataset + index mode
-python -m stand significance results/benchmark_x_per_document_A.json \
-  --baseline-result results/benchmark_x_per_document_B.json
+python -m stand significance results/benchmark_x_shared_A.json \
+  --baseline-result results/benchmark_x_shared_B.json
 ```
-
-The tuned artifact records `adjacency_space`, so `stand run --params tuned`
-reproduces the space automatically. Phantom adjacency is kept only as an A/B
-control: `--dynamic-overrides '{"adjacency_space": "phantom"}'`.
 
 Index modes:
 
-- `per_document`: chunks from each document are indexed separately; retrieval is
-  scoped to the source document for each question. This isolates chunking and
-  expansion behavior.
-- `shared`: chunks from all documents go into one index. Retrieval competes
-  across the whole corpus and is closer to production RAG. Dynamic semantic
-  expansion is still bounded by each seed's `source_doc`.
+- `shared` (default, primary): chunks from all documents go into one index.
+  Retrieval competes across the whole corpus, as in production RAG. Dynamic
+  semantic expansion is still bounded by each seed's `source_doc`.
+- `per_document` (diagnostic): chunks from each document are indexed
+  separately; retrieval is scoped to the source document for each question.
+  Isolates chunking and expansion behavior from cross-document competition.
 
 Each run prints a metrics table and writes a result JSON under `results/`.
 
@@ -200,43 +192,58 @@ Create `.env` with the provider settings you use.
 
 Use `mock/mock:384` only for infrastructure smoke tests.
 
-## Baseline Benchmark Results (2026-07-04)
+## Benchmark Results (2026-07-04)
 
-First full baseline after the stage-0 validity fixes (unified expansion core,
+First full results after the stage-0 validity fixes (unified expansion core,
 phantom-aligned HPO corpus, shared-mode document isolation, shared sentence
 segmentation) and exact tiktoken (`cl100k_base`) token counting. Token numbers
 are not comparable with older chars/4-based results.
 
-Dataset: `wiki_100_qa`
+Both datasets share the same 100 English Wikipedia articles and 300 generated
+QA pairs (QA model: `openai/gpt-5.4-nano`). `wiki_100_qa_hard` additionally
+paraphrases each question away from the answer's lexis (285/300 accepted at
+content-token overlap <= 0.35) and is the primary dataset: the original's
+lexical mirroring compresses strategy differences (ceiling analysis in
+improvement-plan step P.1).
 
-- Source: English Wikipedia
-- 100 articles, 300 generated QA pairs (QA model: `openai/gpt-5.4-nano`)
-- Embedding: `BAAI/bge-small-en-v1.5`
-- `top_k=5`, `metric_k=5`
+Setup: `BAAI/bge-small-en-v1.5`, `top_k=5`, `metric_k=5`. Baselines run
+library-default params. Dynamic Semantic runs per-domain tuned params
+(`python -m stand tune`: Optuna 300 trials, document-level 70/30 split, hard
+1200-token budget); its shipped defaults are pseudo-defaults from the
+pre-fix retrieval path and are not benchmarked.
 
-`dynamic_semantic` is not in these tables: it is evaluated only with
-per-domain tuned params (next section), because its shipped defaults are
-pseudo-defaults from the pre-fix retrieval path.
+**The shared index is the primary evaluation mode**: chunks from all
+documents compete in one corpus-wide index, as in production RAG.
+Per-document results (retrieval scoped to the known source article) are kept
+as a diagnostic that isolates chunking behavior from cross-document
+competition.
 
-Result files:
-
-- `results/benchmark_wiki_100_qa_per_document_20260704_210713.json`
-- `results/benchmark_wiki_100_qa_shared_20260704_211717.json`
-
-### Per-Document Index
-
-Retrieval is scoped to the known source article for each question.
+### wiki_100_qa_hard — shared index (primary)
 
 | Strategy | Tokens | HR@5 | MRR | P@5 | NDCG@5 |
 |----------|-------:|-----:|----:|----:|-------:|
-| Naive Chunking | 1079.8 | 0.9733 | 0.8294 | 0.2060 | 0.8648 |
-| Fixed Window | 1064.2 | 0.9700 | 0.8525 | 0.3267 | 0.8601 |
-| Token Text Splitter | 1216.4 | 0.9500 | 0.8054 | 0.1993 | 0.8408 |
-| Semantic Splitter | 1061.0 | 0.9467 | 0.7766 | 0.1907 | 0.8193 |
+| Naive Chunking | 1091.7 | 0.8800 | 0.7007 | 0.1840 | 0.7453 |
+| Fixed Window | 1010.9 | 0.9000 | 0.7622 | 0.2600 | 0.7850 |
+| Token Text Splitter | 1213.9 | 0.8500 | 0.6689 | 0.1767 | 0.7143 |
+| Semantic Splitter | 970.2 | 0.8267 | 0.6549 | 0.1660 | 0.6983 |
+| **Dynamic Semantic (tuned)** | **832.9** | **0.9300** | **0.8084** | 0.1873 | **0.8391** |
 
-### Shared Corpus Index
+### wiki_100_qa_hard — per-document index (diagnostic)
 
-All chunks from all 100 documents compete in one index.
+| Strategy | Tokens | HR@5 | MRR | P@5 | NDCG@5 |
+|----------|-------:|-----:|----:|----:|-------:|
+| Naive Chunking | 1088.1 | 0.9533 | 0.7698 | 0.2007 | 0.8147 |
+| Fixed Window | 1054.3 | 0.9300 | 0.8025 | 0.3147 | 0.8154 |
+| Token Text Splitter | 1214.6 | 0.9367 | 0.7505 | 0.1960 | 0.7977 |
+| Semantic Splitter | 1034.8 | 0.9200 | 0.7170 | 0.1847 | 0.7680 |
+| **Dynamic Semantic (tuned)** | **930.6** | **0.9667** | **0.8524** | 0.1947 | **0.8816** |
+
+Result files: baselines
+`results/benchmark_wiki_100_qa_hard_{shared_20260704_222345,per_document_20260704_221258}.json`,
+tuned dynamic
+`results/benchmark_wiki_100_qa_hard_{shared_20260704_232244,per_document_20260704_231808}.json`.
+
+### wiki_100_qa — shared index (primary)
 
 | Strategy | Tokens | HR@5 | MRR | P@5 | NDCG@5 |
 |----------|-------:|-----:|----:|----:|-------:|
@@ -244,87 +251,37 @@ All chunks from all 100 documents compete in one index.
 | Fixed Window | 1020.8 | 0.9567 | 0.8375 | 0.2940 | 0.8510 |
 | Token Text Splitter | 1213.7 | 0.9067 | 0.7649 | 0.1893 | 0.7999 |
 | Semantic Splitter | 1021.2 | 0.9133 | 0.7397 | 0.1840 | 0.7832 |
+| **Dynamic Semantic (tuned)** | **903.9** | **0.9733** | **0.8771** | 0.1960 | **0.9018** |
+
+### wiki_100_qa — per-document index (diagnostic)
+
+| Strategy | Tokens | HR@5 | MRR | P@5 | NDCG@5 |
+|----------|-------:|-----:|----:|----:|-------:|
+| Naive Chunking | 1079.8 | 0.9733 | 0.8294 | 0.2060 | 0.8648 |
+| Fixed Window | 1064.2 | 0.9700 | 0.8525 | 0.3267 | 0.8601 |
+| Token Text Splitter | 1216.4 | 0.9500 | 0.8054 | 0.1993 | 0.8408 |
+| Semantic Splitter | 1061.0 | 0.9467 | 0.7766 | 0.1907 | 0.8193 |
+| **Dynamic Semantic (tuned)** | **1030.6** | **0.9867** | **0.9053** | 0.1987 | **0.9263** |
+
+Result files: baselines
+`results/benchmark_wiki_100_qa_{shared_20260704_211717,per_document_20260704_210713}.json`,
+tuned dynamic
+`results/benchmark_wiki_100_qa_{shared_20260704_235638,per_document_20260704_235149}.json`.
 
 ### Reading These Numbers
 
-- The four baselines span HR 0.91-0.97 at roughly 1000-1200 tokens; Fixed
-  Window is the strongest quality/cost point and serves as the reference
-  for Dynamic Semantic in the next section.
-- HR differences between the top strategies are within the statistical noise
-  at n=300 (95% CI is roughly +/-0.02-0.03); `stand significance` computes
-  paired bootstrap CIs for any saved result pair.
-
-## Dynamic Semantic Results (Tuned, Dual-Space)
-
-Dual-space clean adjacency is the reference configuration (accepted in
-improvement-plan step P.3; full A/B against phantom adjacency is recorded
-there). Tuning protocol: Optuna 300 trials, document-level 70/30 split,
-hard 1200-token budget:
-
-```bash
-python -m stand tune --dataset <dataset> --embedding bge-small \
-  --adjacency-space clean --hpo-config configs/hpo_clean_adjacency.yaml --n-trials 300
-```
-
-### wiki_100_qa_hard (2026-07-04)
-
-`wiki_100_qa_hard` paraphrases each question away from the answer's lexis
-(285/300 accepted at content-token overlap <= 0.35), removing the lexical
-mirroring that compresses strategy differences on the original set.
-
-| Configuration | Tokens | HR@5 | MRR |
-|---------------|-------:|-----:|----:|
-| Fixed Window (best baseline), per-document | 1054 | 0.930 | 0.803 |
-| **Dynamic Semantic tuned, per-document** | **931** | **0.967** | **0.852** |
-| Fixed Window (best baseline), shared | 1011 | 0.900 | 0.762 |
-| **Dynamic Semantic tuned, shared** | **833** | **0.930** | **0.808** |
-
-Result files:
-
-- `results/benchmark_wiki_100_qa_hard_per_document_20260704_231808.json`
-- `results/benchmark_wiki_100_qa_hard_shared_20260704_232244.json`
-
-### wiki_100_qa (2026-07-04)
-
-Same tuning protocol on the original (non-paraphrased) dataset. Questions
-lexically mirror answers here, so absolute numbers are higher for every
-strategy and differences are compressed (see the ceiling analysis in
-improvement-plan step P.1).
-
-| Configuration | Tokens | HR@5 | MRR |
-|---------------|-------:|-----:|----:|
-| Fixed Window, per-document | 1064 | 0.970 | 0.853 |
-| **Dynamic Semantic tuned, per-document** | **1031** | **0.987** | **0.905** |
-| Fixed Window, shared | 1021 | 0.957 | 0.838 |
-| **Dynamic Semantic tuned, shared** | **904** | **0.973** | **0.877** |
-
-Tuned dynamic beats every baseline in both modes (the best baseline HR is
-Naive Chunking's 0.9733 per-document at 1080 tokens), while staying below
-every baseline's token budget.
-
-Result files:
-
-- `results/benchmark_wiki_100_qa_per_document_20260704_235149.json`
-- `results/benchmark_wiki_100_qa_shared_20260704_235638.json`
-
-### Reading the Tuned Numbers
-
-The project thesis holds on both datasets in both index modes: higher HR/MRR
-than the strongest baseline at a smaller token budget. Paired bootstrap over
-questions (10000 resamples, 95% CI; `stand significance`) makes this precise:
-
-- ΔMRR is significantly positive vs every baseline in all four
-  dataset/mode combinations (+0.040 to +0.153).
-- ΔHR is never significantly negative anywhere; vs the strongest baseline
-  (Fixed Window) it is significantly positive on `wiki_100_qa_hard`
-  per-document (+0.037 [+0.007, +0.067]) and statistically indistinguishable
-  (positive, ns) in the other three combinations.
-- Tokens are lower than every baseline in every combination, so "same or
-  better quality for fewer tokens" is established with significance.
-
-Full CI tables are in `docs/improvement_plan.md`, step 1.2. Low P@5 relative
-to baselines is expected and not tracked here: merged clusters mean fewer,
-larger retrieved units, which P@5 penalizes regardless of context quality.
+- In the primary (shared) mode Dynamic Semantic tops every metric except
+  P@5 on both datasets while spending fewer tokens than every baseline.
+- Paired bootstrap over questions (10000 resamples, 95% CI;
+  `stand significance`): in shared mode ΔHR and ΔMRR vs Naive, Token Text,
+  and Semantic Splitter are significantly positive on both datasets; vs
+  Fixed Window ΔMRR is significantly positive (+0.046 hard, +0.040 wiki)
+  and ΔHR is positive but within noise (+0.030 / +0.017) at ~18%/11% fewer
+  tokens. In the per-document diagnostic ΔHR vs Fixed Window is significant
+  on hard (+0.037 [+0.007, +0.067]). HR is never significantly below any
+  baseline anywhere. Full CI tables: `docs/improvement_plan.md`, step 1.2.
+- Low P@5 for Dynamic Semantic is expected: merged clusters mean fewer,
+  larger retrieved units, which P@5 penalizes regardless of context quality.
 
 ## Legacy Benchmark Results (Outdated)
 
