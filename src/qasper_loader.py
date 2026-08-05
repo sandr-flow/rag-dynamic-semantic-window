@@ -1,13 +1,21 @@
 """QASPER dataset loader for benchmark testing.
 
 Loads scientific papers from the QASPER dataset (Question Answering on
-Scientific Papers) via Hugging Face datasets library.
+Scientific Papers) from the Hugging Face hub.
 
-Requires: datasets==2.21.0 (newer versions removed script support)
-Install: pip install datasets==2.21.0
+Reads the hub's auto-converted parquet branch directly instead of going
+through ``datasets.load_dataset``: QASPER only ships a loading script, which
+needs ``datasets==2.21.0``, which in turn pins ``dill<0.3.9`` -- and dill
+0.3.8 cannot run on Python 3.14 (it overrides the stdlib pickler's
+``_batch_setitems``, whose signature changed). The parquet files carry the
+same schema, so nothing downstream changes.
 """
 
-from datasets import load_dataset
+import pyarrow.parquet as pq
+from huggingface_hub import hf_hub_download
+
+QASPER_REPO = "allenai/qasper"
+PARQUET_REVISION = "refs/convert/parquet"
 
 
 def load_qasper_dataset(split: str = "validation") -> list[dict]:
@@ -20,8 +28,13 @@ def load_qasper_dataset(split: str = "validation") -> list[dict]:
     Returns:
         List of paper dicts.
     """
-    dataset = load_dataset("allenai/qasper", split=split, trust_remote_code=True)
-    return list(dataset)
+    path = hf_hub_download(
+        QASPER_REPO,
+        f"qasper/{split}/0000.parquet",
+        repo_type="dataset",
+        revision=PARQUET_REVISION,
+    )
+    return pq.read_table(path).to_pylist()
 
 
 def extract_full_text(paper: dict) -> str:

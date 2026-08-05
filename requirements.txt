@@ -14,8 +14,10 @@ chromadb>=0.4.0
 sentence-transformers>=2.2.0
 
 # Datasets
-datasets==2.21.0  # Pinned for QASPER compatibility
+# QASPER is read straight from the hub's parquet branch; `datasets` is not
+# needed and its QASPER-era pin (2.21.0 -> dill<0.3.9) breaks on Python 3.14.
 huggingface-hub>=0.20.0
+pyarrow>=15.0.0
 
 # Utilities
 python-dotenv>=1.0.0
