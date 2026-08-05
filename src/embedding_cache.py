@@ -25,6 +25,7 @@ import atexit
 import hashlib
 import os
 import pickle
+import time
 import warnings
 from pathlib import Path
 from typing import Any
@@ -53,6 +54,7 @@ class EmbeddingStore:
 
     def _load(self) -> dict[str, np.ndarray]:
         if self._entries is None:
+            started = time.time()
             if self._path.exists():
                 try:
                     with open(self._path, "rb") as f:
@@ -65,6 +67,11 @@ class EmbeddingStore:
                     self._entries = {}
             else:
                 self._entries = {}
+            print(
+                f"[embedding-cache] loaded {len(self._entries)} vectors "
+                f"from {self._path} in {time.time() - started:.1f}s",
+                flush=True,
+            )
         return self._entries
 
     def __len__(self) -> int:
@@ -87,12 +94,20 @@ class EmbeddingStore:
     def flush(self) -> None:
         if not self._dirty or self._entries is None:
             return
+        started = time.time()
+        dirty = self._dirty
         self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = self._path.with_name(f"{self._path.name}.{os.getpid()}.tmp")
         with open(tmp_path, "wb") as f:
             pickle.dump(self._entries, f, protocol=pickle.HIGHEST_PROTOCOL)
         os.replace(tmp_path, self._path)
         self._dirty = 0
+        print(
+            f"[embedding-cache] flushed {dirty} new vectors "
+            f"({len(self._entries)} stored) to {self._path} "
+            f"in {time.time() - started:.1f}s",
+            flush=True,
+        )
 
 
 class CachingEmbedding(BaseEmbedding):
@@ -130,12 +145,65 @@ class CachingEmbedding(BaseEmbedding):
     def flush_cache(self) -> None:
         self._store.flush()
 
+    def prewarm_queries(self, queries: list[str]) -> int:
+        """Batch-embed uncached queries ahead of retrieval; returns miss count.
+
+        There is no public batch API for query-mode embeddings in LlamaIndex,
+        so during evaluation every question would otherwise cost one blocking
+        request. This issues the misses concurrently (embed_batch_size at a
+        time) through the inner model's query path, preserving query-mode
+        semantics for instruction-prefixed models such as bge.
+        """
+        unique = list(dict.fromkeys(queries))
+        missing = [
+            q for q in unique if self._store.get(_cache_key("query", q)) is None
+        ]
+        if not missing:
+            return 0
+
+        started = time.time()
+        print(
+            f"[embedding-cache] query prewarm: {len(unique) - len(missing)} hits, "
+            f"{len(missing)} misses; requesting {len(missing)} embeddings",
+            flush=True,
+        )
+
+        aget = getattr(self._inner, "aget_query_embedding", None)
+        if aget is None:
+            embeddings = [self._inner.get_query_embedding(q) for q in missing]
+        else:
+            import asyncio
+
+            async def _gather() -> list[Embedding]:
+                out: list[Embedding] = []
+                for start in range(0, len(missing), self.embed_batch_size):
+                    chunk = missing[start : start + self.embed_batch_size]
+                    out.extend(await asyncio.gather(*(aget(q) for q in chunk)))
+                return out
+
+            embeddings = asyncio.run(_gather())
+
+        for query, embedding in zip(missing, embeddings, strict=True):
+            self._store.put(_cache_key("query", query), embedding)
+        print(
+            f"[embedding-cache] query prewarm received {len(missing)} embeddings "
+            f"in {time.time() - started:.1f}s",
+            flush=True,
+        )
+        return len(missing)
+
     def _get_query_embedding(self, query: str) -> Embedding:
         cached = self._store.get(_cache_key("query", query))
         if cached is not None:
             return cached.tolist()
+        started = time.time()
+        print("[embedding-cache] query miss: requesting 1 embedding", flush=True)
         embedding = self._inner.get_query_embedding(query)
         self._store.put(_cache_key("query", query), embedding)
+        print(
+            f"[embedding-cache] query embedding received in {time.time() - started:.1f}s",
+            flush=True,
+        )
         return embedding
 
     async def _aget_query_embedding(self, query: str) -> Embedding:
@@ -157,10 +225,21 @@ class CachingEmbedding(BaseEmbedding):
             else:
                 results[i] = cached.tolist()
         if missing:
+            started = time.time()
+            print(
+                f"[embedding-cache] text batch: {len(texts) - len(missing)} hits, "
+                f"{len(missing)} misses; requesting {len(missing)} embeddings",
+                flush=True,
+            )
             fresh = self._inner.get_text_embedding_batch([texts[i] for i in missing])
             for i, embedding in zip(missing, fresh, strict=True):
                 self._store.put(_cache_key("text", texts[i]), embedding)
                 results[i] = embedding
+            print(
+                f"[embedding-cache] text batch received {len(missing)} embeddings "
+                f"in {time.time() - started:.1f}s",
+                flush=True,
+            )
         return results  # type: ignore[return-value]
 
 

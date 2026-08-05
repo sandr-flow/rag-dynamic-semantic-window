@@ -21,12 +21,15 @@ from src.corpus_data import (
     ArticleData,
     CorpusData,
     QuestionData,
+    build_shared_global_arrays,
     find_answer_sentence_idx,
+    question_is_valid,
     split_corpus_by_documents,
 )
 from src.utils import build_embedding_texts, split_into_sentences
 
 from . import artifacts, paths
+from .corpus_filter import drop_unchunkable_items
 from .embeddings import prepare_embed_model, report_cache
 
 
@@ -49,25 +52,32 @@ def _question_sims(q_embedding: np.ndarray, sentence_embeddings: np.ndarray) -> 
     return (sentence_embeddings / s_norms) @ q
 
 
-def _build_corpus(
+def _embed_texts_batched(embed_model, texts: list[str], *, label: str) -> list:
+    """Embed texts in chunks with periodic progress logs."""
+    if not texts:
+        return []
+    batch_size = max(1, int(getattr(embed_model, "embed_batch_size", 64)))
+    total = len(texts)
+    log_stride = max(1, total // 10)
+    print(f"  [INFO] embedding {total} {label}...", flush=True)
+    embeddings: list = []
+    for start in range(0, total, batch_size):
+        chunk = texts[start : start + batch_size]
+        embeddings.extend(embed_model.get_text_embedding_batch(chunk))
+        done = min(start + len(chunk), total)
+        if done % log_stride == 0 or done == total:
+            print(f"  [INFO] embedded {done}/{total} {label}", flush=True)
+    return embeddings
+
+
+def _embed_articles(
     items: list[dict],
     embed_model,
     *,
-    source: str,
-    embedding_provider: str,
-    embedding_model: str,
     phantom_window: int,
-    top_k: int = 100,
     min_sentences: int = 10,
-) -> CorpusData:
-    """Precompute sentence/question embeddings + similarity matrices.
-
-    Question sentence_sims are computed against the corpus embedding mode
-    (phantom texts when phantom_window > 0), while per-article neighbor_sims
-    always come from clean sentence embeddings — mirroring the live
-    dual-space strategy so the HPO surrogate stays aligned. With
-    phantom_window=0 the spaces coincide and no second batch is needed.
-    """
+) -> list[ArticleData]:
+    """Embed corpus documents into per-article arrays."""
     use_clean_adjacency = phantom_window > 0
     articles: list[ArticleData] = []
     total = len(items)
@@ -96,7 +106,31 @@ def _build_corpus(
         )
         if (article_id + 1) % log_stride == 0 or article_id + 1 == total:
             print(f"  [INFO] embedded {article_id + 1}/{total} articles")
+    return articles
 
+
+def _build_corpus(
+    items: list[dict],
+    embed_model,
+    *,
+    source: str,
+    embedding_provider: str,
+    embedding_model: str,
+    phantom_window: int,
+    top_k: int = 100,
+    min_sentences: int = 10,
+) -> CorpusData:
+    """Precompute sentence/question embeddings + similarity matrices.
+
+    Question sentence_sims are computed against the corpus embedding mode
+    (phantom texts when phantom_window > 0), while per-article neighbor_sims
+    always come from clean sentence embeddings — mirroring the live
+    dual-space strategy so the HPO surrogate stays aligned. With
+    phantom_window=0 the spaces coincide and no second batch is needed.
+    """
+    articles = _embed_articles(
+        items, embed_model, phantom_window=phantom_window, min_sentences=min_sentences
+    )
     item_by_id = {i: item for i, item in enumerate(items)}
 
     # Collect all questions first, then embed them in one batched pass
@@ -105,10 +139,8 @@ def _build_corpus(
         for qa in item_by_id[article.article_id].get("qa_pairs", []):
             pending.append((article, qa))
 
-    question_embeddings = (
-        embed_model.get_text_embedding_batch([qa["question"] for _, qa in pending])
-        if pending
-        else []
+    question_embeddings = _embed_texts_batched(
+        embed_model, [qa["question"] for _, qa in pending], label="questions"
     )
 
     questions: list[QuestionData] = []
@@ -148,6 +180,131 @@ def _build_corpus(
     )
 
 
+def _build_extrahard_corpus(
+    items: list[dict],
+    pairs: list[dict],
+    embed_model,
+    *,
+    source: str,
+    embedding_provider: str,
+    embedding_model: str,
+    phantom_window: int,
+    top_k: int = 100,
+    min_sentences: int = 10,
+) -> CorpusData:
+    """Precompute a shared-index corpus for cross-document compound questions."""
+    from src.config import DEFAULT_EXPANSION_CONFIG
+
+    articles = _embed_articles(
+        items, embed_model, phantom_window=phantom_window, min_sentences=min_sentences
+    )
+    if len(articles) < 2:
+        raise ValueError("Extrahard tuning needs at least two chunkable corpus documents")
+
+    (
+        global_sentences,
+        global_neighbor_sims,
+        global_garbage_mask,
+        global_segment_ids,
+        article_offsets,
+    ) = build_shared_global_arrays(
+        articles,
+        [items[article.article_id] for article in articles],
+        min_chunk_length=DEFAULT_EXPANSION_CONFIG.min_chunk_length,
+    )
+    global_embeddings = np.concatenate([article.embeddings for article in articles], axis=0)
+    print(
+        f"  [INFO] shared index: {len(global_sentences)} sentences "
+        f"across {len(articles)} docs",
+        flush=True,
+    )
+    article_by_id = {article.article_id: article for article in articles}
+    item_id_to_article = {
+        str(item.get("id", idx)): idx for idx, item in enumerate(items)
+    }
+
+    pending: list[tuple[dict, list[int], list[int]]] = []
+    for pair in pairs:
+        source_article_ids: list[int] = []
+        answer_local_indices: list[int] = []
+        valid_pair = True
+        for doc_id, answer in zip(
+            pair["source_docs"], pair["answer_sentences"], strict=True
+        ):
+            article_id = item_id_to_article.get(str(doc_id))
+            if article_id is None or article_id not in article_by_id:
+                valid_pair = False
+                break
+            local_idx = find_answer_sentence_idx(
+                article_by_id[article_id].sentences, answer
+            )
+            source_article_ids.append(article_id)
+            answer_local_indices.append(local_idx)
+        if valid_pair:
+            pending.append((pair, source_article_ids, answer_local_indices))
+
+    question_embeddings = _embed_texts_batched(
+        embed_model,
+        [pair["question"] for pair, _, _ in pending],
+        label="compound questions",
+    )
+
+    questions: list[QuestionData] = []
+    total_pending = len(pending)
+    sim_log_stride = max(1, total_pending // 10)
+    if total_pending:
+        print(
+            f"  [INFO] computing global similarities for {total_pending} compound questions...",
+            flush=True,
+        )
+    for qid, ((pair, source_article_ids, answer_local_indices), raw_embedding) in enumerate(
+        zip(pending, question_embeddings, strict=True)
+    ):
+        q_embedding = np.array(raw_embedding, dtype=np.float32)
+        sentence_sims = _question_sims(q_embedding, global_embeddings)
+        k = min(top_k, len(sentence_sims))
+        top_k_indices = np.argsort(sentence_sims)[::-1][:k].astype(np.int32)
+        questions.append(
+            QuestionData(
+                question_id=qid,
+                article_id=source_article_ids[0],
+                question=pair["question"],
+                answer_sentence=pair["answer_sentences"][0],
+                answer_sentence_idx=answer_local_indices[0],
+                embedding=q_embedding,
+                sentence_sims=sentence_sims,
+                top_k_indices=top_k_indices,
+                source_article_ids=source_article_ids,
+                answer_local_indices=answer_local_indices,
+            )
+        )
+        if (qid + 1) % sim_log_stride == 0 or qid + 1 == total_pending:
+            print(
+                f"  [INFO] similarities {qid + 1}/{total_pending} compound questions",
+                flush=True,
+            )
+
+    embed_dim = articles[0].embeddings.shape[1] if articles else 384
+    return CorpusData(
+        articles=articles,
+        questions=questions,
+        embed_dim=embed_dim,
+        top_k=top_k,
+        source=source,
+        embedding_provider=embedding_provider,
+        embedding_model=embedding_model,
+        phantom_window=phantom_window,
+        embedding_mode=_embedding_mode(phantom_window),
+        adjacency_space="clean",
+        kind="shared",
+        global_sentences=global_sentences,
+        global_neighbor_sims=global_neighbor_sims,
+        global_garbage_mask=global_garbage_mask,
+        global_segment_ids=global_segment_ids,
+        article_offsets=article_offsets,
+    )
+
+
 def _embedding_mode(phantom_window: int) -> str:
     """Corpus embedding mode, also the corpus-cache key component.
 
@@ -181,24 +338,43 @@ def _load_or_build_corpus(
 
     embed_model, embedding_config = prepare_embed_model(embedding)
 
-    items = artifacts.load_dataset_items(dataset)
-    print(
-        f"[INFO] Building corpus cache for {dataset} + {embedding} "
-        f"mode={_embedding_mode(phantom_window)} ({len(items)} docs)..."
-    )
-    corpus = _build_corpus(
-        items,
-        embed_model,
-        source=dataset,
-        embedding_provider=embedding_config.provider,
-        embedding_model=embedding_config.model,
-        phantom_window=phantom_window,
-    )
+    extrahard = artifacts.is_extrahard(dataset)
+    if extrahard:
+        items = drop_unchunkable_items(artifacts.load_corpus_items(dataset))
+        pairs = artifacts.load_eval_questions(dataset)
+        print(
+            f"[INFO] Building extrahard shared corpus for {dataset} + {embedding} "
+            f"mode={_embedding_mode(phantom_window)} "
+            f"({len(items)} docs, {len(pairs)} compound q)..."
+        )
+        corpus = _build_extrahard_corpus(
+            items,
+            pairs,
+            embed_model,
+            source=dataset,
+            embedding_provider=embedding_config.provider,
+            embedding_model=embedding_config.model,
+            phantom_window=phantom_window,
+        )
+    else:
+        items = artifacts.load_dataset_items(dataset)
+        print(
+            f"[INFO] Building corpus cache for {dataset} + {embedding} "
+            f"mode={_embedding_mode(phantom_window)} ({len(items)} docs)..."
+        )
+        corpus = _build_corpus(
+            items,
+            embed_model,
+            source=dataset,
+            embedding_provider=embedding_config.provider,
+            embedding_model=embedding_config.model,
+            phantom_window=phantom_window,
+        )
     paths.CORPUS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     with open(cache_path, "wb") as f:
         pickle.dump(corpus, f)
     report_cache(embed_model)
-    valid = sum(1 for q in corpus.questions if q.answer_sentence_idx >= 0)
+    valid = sum(1 for q in corpus.questions if question_is_valid(q, corpus))
     print(
         f"[OK] Corpus cached: {len(corpus.articles)} articles, "
         f"{len(corpus.questions)} questions ({valid} with answer found)"
@@ -259,10 +435,10 @@ def tune(
         corpus, train_ratio=train_ratio, seed=split_seed
     )
     valid_train_questions = sum(
-        1 for q in train_corpus.questions if q.answer_sentence_idx >= 0
+        1 for q in train_corpus.questions if question_is_valid(q, train_corpus)
     )
     valid_val_questions = sum(
-        1 for q in val_corpus.questions if q.answer_sentence_idx >= 0
+        1 for q in val_corpus.questions if question_is_valid(q, val_corpus)
     )
     if valid_train_questions == 0:
         raise ValueError(
@@ -323,6 +499,8 @@ def tune(
             # strict sub-HR tie-breaker, MRR last. See ObjectivePolicy.
             "objective": asdict(hpo_settings.objective),
             "hpo_config": hpo_config,
+            "corpus_kind": corpus.kind,
+            "index_mode": "shared" if corpus.kind == "shared" else "per_document",
         },
     )
 

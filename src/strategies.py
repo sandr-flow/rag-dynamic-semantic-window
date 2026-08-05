@@ -11,7 +11,6 @@ from llama_index.core.node_parser import (
     TokenTextSplitter,
 )
 from llama_index.core.postprocessor import MetadataReplacementPostProcessor
-from llama_index.core.retrievers import VectorIndexRetriever
 from llama_index.core.schema import Document, NodeWithScore, QueryBundle
 
 from src.config import (
@@ -63,7 +62,49 @@ class BaseStrategy(ABC):
         self.documents = documents
         self.top_k = top_k
         self.index: VectorStoreIndex | None = None
+        self._matrix: np.ndarray | None = None
+        self._matrix_node_ids: list[str] | None = None
         self._build_index()
+
+    def _ensure_matrix(self) -> None:
+        """Materialize all index embeddings into one normalized numpy matrix.
+
+        ``SimpleVectorStore.query`` rebuilds a numpy array from a python list
+        of lists on *every* query, which is unbearably slow on large shared
+        indexes. Doing the conversion once turns each query into a single
+        matrix-vector product.
+        """
+        if self._matrix is not None:
+            return
+        data = self.index.vector_store._data
+        node_ids = list(data.embedding_dict.keys())
+        matrix = np.asarray(
+            [data.embedding_dict[nid] for nid in node_ids], dtype=np.float32
+        )
+        norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        self._matrix = matrix / norms
+        self._matrix_node_ids = node_ids
+
+    def _fast_retrieve(self, query: str, top_k: int) -> list[NodeWithScore]:
+        """Cosine top-k over the precomputed matrix (SimpleVectorStore parity)."""
+        self._ensure_matrix()
+        q = np.asarray(Settings.embed_model.get_query_embedding(query), dtype=np.float32)
+        q_norm = np.linalg.norm(q)
+        if q_norm:
+            q = q / q_norm
+        scores = self._matrix @ q
+        k = min(top_k, len(scores))
+        top = np.argpartition(scores, -k)[-k:]
+        top = top[np.argsort(scores[top])[::-1]]
+        docstore = self.index.docstore
+        return [
+            NodeWithScore(
+                node=docstore.get_node(self._matrix_node_ids[i]),
+                score=float(scores[i]),
+            )
+            for i in top
+        ]
 
     @abstractmethod
     def _build_index(self) -> None:
@@ -121,8 +162,7 @@ class NaiveChunkingStrategy(BaseStrategy):
 
     def retrieve(self, query: str) -> list[NodeWithScore]:
         """Retrieve using simple top-k."""
-        retriever = VectorIndexRetriever(index=self.index, similarity_top_k=self.top_k)
-        return retriever.retrieve(query)
+        return self._fast_retrieve(query, self.top_k)
 
 
 class FixedWindowStrategy(BaseStrategy):
@@ -157,8 +197,7 @@ class FixedWindowStrategy(BaseStrategy):
 
     def retrieve(self, query: str) -> list[NodeWithScore]:
         """Retrieve with metadata replacement for window context."""
-        retriever = VectorIndexRetriever(index=self.index, similarity_top_k=self.top_k)
-        nodes = retriever.retrieve(query)
+        nodes = self._fast_retrieve(query, self.top_k)
 
         # Replace node text with window context
         postprocessor = MetadataReplacementPostProcessor(target_metadata_key="window")
@@ -194,8 +233,7 @@ class TokenTextSplitterStrategy(BaseStrategy):
         self.index = VectorStoreIndex(nodes)
 
     def retrieve(self, query: str) -> list[NodeWithScore]:
-        retriever = VectorIndexRetriever(index=self.index, similarity_top_k=self.top_k)
-        return retriever.retrieve(query)
+        return self._fast_retrieve(query, self.top_k)
 
 
 class DynamicSemanticStrategy(BaseStrategy):
@@ -325,8 +363,7 @@ class DynamicSemanticStrategy(BaseStrategy):
         """
         # Two-pass: first pass fetches more seeds for better coverage
         prefetch_k = self.top_k * self.prefetch_multiplier
-        retriever = VectorIndexRetriever(index=self.index, similarity_top_k=prefetch_k)
-        nodes = retriever.retrieve(query)
+        nodes = self._fast_retrieve(query, prefetch_k)
 
         return self.expander.postprocess_nodes(nodes, QueryBundle(query_str=query))
 
@@ -363,8 +400,7 @@ class SemanticSplitterStrategy(BaseStrategy):
 
     def retrieve(self, query: str) -> list[NodeWithScore]:
         """Retrieve using simple top-k."""
-        retriever = VectorIndexRetriever(index=self.index, similarity_top_k=self.top_k)
-        return retriever.retrieve(query)
+        return self._fast_retrieve(query, self.top_k)
 
 
 

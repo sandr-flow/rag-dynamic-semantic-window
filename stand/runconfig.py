@@ -42,6 +42,11 @@ class RunConfig:
     params: str = "default"
     """default = config.py defaults; tuned = load tuned artifact for (dataset, embedding)."""
 
+    tuned_dataset: str | None = None
+    """When set with params=tuned, load tuned artifact from this dataset instead
+    of ``dataset`` (same embedding). Useful for cross-eval, e.g. extrahard
+    tuned params on the underlying hard dataset."""
+
     top_k: int = 5
     """Chunks/clusters retrieved per query."""
 

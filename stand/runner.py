@@ -15,7 +15,8 @@ from typing import Any
 import numpy as np
 from llama_index.core import Document
 
-from src.metrics import compute_all_metrics
+from src.embedding_cache import CachingEmbedding
+from src.metrics import compute_all_metrics, compute_multi_answer_metrics
 from src.significance import (
     DEFAULT_CONFIDENCE,
     DEFAULT_RESAMPLES,
@@ -31,6 +32,7 @@ from src.strategy_registry import (
 from src.tokens import count_tokens
 
 from . import artifacts, paths
+from .corpus_filter import drop_unchunkable_items
 from .embeddings import prepare_embed_model, report_cache
 from .runconfig import RunConfig
 
@@ -44,10 +46,11 @@ def _resolve_tuned(config: RunConfig) -> tuple[dict[str, Any], dict[str, Any] | 
     params: dict[str, Any] = {}
     tuned = None
     if config.params == "tuned":
-        tuned = artifacts.load_tuned(config.dataset, config.embedding)
+        tuned_source = config.tuned_dataset or config.dataset
+        tuned = artifacts.load_tuned(tuned_source, config.embedding)
         if tuned is None:
             raise ValueError(
-                f"No tuned params for dataset '{config.dataset}' + embedding "
+                f"No tuned params for dataset '{tuned_source}' + embedding "
                 f"'{config.embedding}'. Run: python -m stand tune ..."
             )
         params.update(tuned.get("params", {}))
@@ -80,12 +83,20 @@ def _document_from_item(item: dict[str, Any], index: int) -> Document:
     )
 
 
-def _should_log_step(current: int, total: int) -> bool:
-    """Log every step for small batches; ~10 milestones for larger ones."""
-    if total <= 10:
-        return True
-    stride = max(1, total // 10)
-    return current == 1 or current == total or current % stride == 0
+    """Filter out documents whose nltk sentence split yields giant blobs."""
+    return drop_unchunkable_items(items, verbose=verbose)
+
+
+def _metrics_for_qa(
+    texts: list[str], qa: dict[str, Any], metric_k: int
+) -> dict[str, float]:
+    if "answer_sentences" in qa:
+        return compute_multi_answer_metrics(texts, qa["answer_sentences"], k=metric_k)
+    answer = qa.get("answer_sentence", qa.get("answer", ""))
+    return compute_all_metrics(texts, answer, k=metric_k)
+
+
+EVAL_LOG_INTERVAL_S = 10.0
 
 
 def _build_strategies(
@@ -109,17 +120,26 @@ def _build_strategies(
         normalized = normalize_strategy_id(strategy_id)
         if normalized in failed:
             continue
+        started = time.time()
         if verbose:
-            print(f"     {log_prefix}index {normalized} ({i}/{len(strategy_ids)})")
+            print(
+                f"     {log_prefix}index {normalized} ({i}/{len(strategy_ids)})...",
+                flush=True,
+            )
         overrides = dynamic_overrides if normalized == "dynamic_semantic" else {}
         try:
-            strategies.append(
-                create_strategy(normalized, documents, top_k=top_k, overrides=overrides)
-            )
+            strategy = create_strategy(normalized, documents, top_k=top_k, overrides=overrides)
+            strategies.append(strategy)
+            if verbose:
+                print(
+                    f"     {log_prefix}index {normalized} done "
+                    f"({time.time() - started:.1f}s)",
+                    flush=True,
+                )
         except Exception as exc:  # incompatible parser for this document type
             failed.add(normalized)
             print(f"  [skip] strategy '{normalized}' failed to build: "
-                  f"{type(exc).__name__}: {exc}")
+                  f"{type(exc).__name__}: {exc}", flush=True)
     return strategies
 
 
@@ -134,15 +154,30 @@ def _evaluate(
     """Run every qa pair against every (already built) strategy."""
     results: dict[str, list[dict]] = {s.name: [] for s in strategies}
     total = len(qa_pairs)
+    expected = total * len(strategies)
+    started = time.time()
+    last_log = 0.0
     for qi, qa in enumerate(qa_pairs, 1):
-        if verbose and _should_log_step(qi, total):
-            print(f"     {log_prefix}eval {qi}/{total} questions")
+        now = time.time()
+        # Time-based heartbeat: the first question and then at most one line
+        # every EVAL_LOG_INTERVAL_S, so long evals never look hung.
+        if verbose and (qi == 1 or qi == total or now - last_log >= EVAL_LOG_INTERVAL_S):
+            last_log = now
+            done = sum(len(rows) for rows in results.values())
+            eta = ""
+            if done:
+                remaining_s = (expected - done) * (now - started) / done
+                eta = f", ETA {remaining_s / 60:.1f} min"
+            print(
+                f"     {log_prefix}eval {qi}/{total} questions "
+                f"({done}/{expected} strategy queries done{eta})",
+                flush=True,
+            )
         question = qa["question"]
-        answer = qa.get("answer_sentence", qa.get("answer", ""))
         for strategy in strategies:
             nodes = strategy.retrieve(question)
             texts = [n.node.text for n in nodes]
-            metrics = compute_all_metrics(texts, answer, k=metric_k)
+            metrics = _metrics_for_qa(texts, qa, metric_k)
             metrics["tokens"] = count_tokens(" ".join(texts))
             results[strategy.name].append(metrics)
     return results
@@ -161,15 +196,32 @@ def run(config: RunConfig, *, verbose: bool = True) -> dict[str, Any]:
 
     embed_model, embedding_config = prepare_embed_model(config.embedding)
 
-    items = artifacts.load_dataset_items(config.dataset, limit=config.limit)
-    if not items:
-        raise ValueError(f"Dataset '{config.dataset}' has no items with qa_pairs")
+    if artifacts.is_extrahard(config.dataset) and config.index_mode != "shared":
+        raise ValueError(
+            f"Dataset '{config.dataset}' is extrahard (cross-document compound "
+            "questions) and requires --index-mode shared"
+        )
+
+    corpus_items = artifacts.load_corpus_items(config.dataset, limit=config.limit)
+    if not corpus_items:
+        raise ValueError(f"Dataset '{config.dataset}' has no corpus items")
+
+    n_before = len(corpus_items)
+    corpus_items = drop_unchunkable_items(corpus_items, verbose=verbose)
+    if verbose and len(corpus_items) < n_before:
+        print(f"  [INFO] dropped {n_before - len(corpus_items)} unchunkable doc(s), {len(corpus_items)} remain")
+    if not corpus_items:
+        raise ValueError(f"Dataset '{config.dataset}' has no chunkable items left")
+
+    eval_questions = artifacts.load_eval_questions(config.dataset, limit=config.limit)
+    if not eval_questions:
+        raise ValueError(f"Dataset '{config.dataset}' has no evaluation questions")
 
     if verbose:
         print("=" * 64)
         print("Dynamic Semantic Window Benchmark")
         print("=" * 64)
-        print(f"Dataset:    {config.dataset} ({len(items)} docs)")
+        print(f"Dataset:    {config.dataset} ({len(corpus_items)} docs)")
         print(f"Embedding:  {embedding_config.provider}/{embedding_config.model}")
         print(f"Strategies: {', '.join(strategy_ids)}")
         print(f"Index mode: {config.index_mode}")
@@ -179,8 +231,10 @@ def run(config: RunConfig, *, verbose: bool = True) -> dict[str, Any]:
             print(f"Dynamic params (tuned/overrides): {dynamic_overrides}")
         if tuned_manifest and tuned_manifest.get("metrics_val"):
             val = tuned_manifest["metrics_val"]
+            tuned_from = config.tuned_dataset or config.dataset
             print(
-                "Tuned validation expectation: "
+                f"Tuned params from '{tuned_from}' "
+                f"(eval on '{config.dataset}'): "
                 f"HR={val.get('hit_rate', 0):.4f}, "
                 f"MRR={val.get('mrr', 0):.4f}, "
                 f"tokens={val.get('avg_tokens', 0):.0f}"
@@ -191,12 +245,18 @@ def run(config: RunConfig, *, verbose: bool = True) -> dict[str, Any]:
     aggregate: dict[str, list[dict]] = {}
     failed: set[str] = set()
 
+    # Question embeddings are needed one-by-one during retrieval; batch the
+    # cold ones up front so evaluation is not serialized on network calls.
+    if isinstance(embed_model, CachingEmbedding):
+        embed_model.prewarm_queries([qa["question"] for qa in eval_questions])
+
+    multi_answer = any("answer_sentences" in qa for qa in eval_questions)
+
     if config.index_mode == "shared":
-        documents = [_document_from_item(item, idx) for idx, item in enumerate(items)]
-        all_qa = [qa for item in items for qa in item["qa_pairs"]]
-        shared_prefix = f"[shared {len(documents)} docs, {len(all_qa)} q]"
+        documents = [_document_from_item(item, idx) for idx, item in enumerate(corpus_items)]
+        shared_prefix = f"[shared {len(documents)} docs, {len(eval_questions)} q]"
         if verbose:
-            print(f"  {shared_prefix} indexing...")
+            print(f"  {shared_prefix} indexing...", flush=True)
         shared_start = time.time()
         strategies = _build_strategies(
             strategy_ids,
@@ -208,26 +268,29 @@ def run(config: RunConfig, *, verbose: bool = True) -> dict[str, Any]:
             log_prefix=f"{shared_prefix} ",
         )
         if verbose:
-            print(f"  {shared_prefix} evaluating...")
+            print(f"  {shared_prefix} evaluating...", flush=True)
         _merge(
             aggregate,
             _evaluate(
                 strategies,
-                all_qa,
+                eval_questions,
                 metric_k,
                 verbose=verbose,
                 log_prefix=f"{shared_prefix} ",
             ),
         )
         if verbose:
-            print(f"  {shared_prefix} done ({time.time() - shared_start:.1f}s)")
+            print(f"  {shared_prefix} done ({time.time() - shared_start:.1f}s)", flush=True)
     else:  # per_document
-        n_docs = len(items)
-        for doc_idx, item in enumerate(items, 1):
-            n_q = len(item["qa_pairs"])
+        n_docs = len(corpus_items)
+        for doc_idx, item in enumerate(corpus_items, 1):
+            doc_qa = [qa for qa in eval_questions if str(item.get("id", doc_idx - 1)) in qa.get("source_docs", [])]
+            if not doc_qa:
+                doc_qa = item.get("qa_pairs", [])
+            n_q = len(doc_qa)
             doc_prefix = f"[{doc_idx}/{n_docs}]"
             if verbose:
-                print(f"  {doc_prefix} {item['title']} ({n_q} q) - indexing...")
+                print(f"  {doc_prefix} {item['title']} ({n_q} q) - indexing...", flush=True)
             doc_start = time.time()
             documents = [_document_from_item(item, doc_idx - 1)]
             strategies = _build_strategies(
@@ -240,19 +303,19 @@ def run(config: RunConfig, *, verbose: bool = True) -> dict[str, Any]:
                 log_prefix=f"{doc_prefix} ",
             )
             if verbose:
-                print(f"     {doc_prefix} evaluating...")
+                print(f"     {doc_prefix} evaluating...", flush=True)
             _merge(
                 aggregate,
                 _evaluate(
                     strategies,
-                    item["qa_pairs"],
+                    doc_qa,
                     metric_k,
                     verbose=verbose,
                     log_prefix=f"{doc_prefix} ",
                 ),
             )
             if verbose:
-                print(f"     {doc_prefix} done ({time.time() - doc_start:.1f}s)")
+                print(f"     {doc_prefix} done ({time.time() - doc_start:.1f}s)", flush=True)
 
     if failed and not aggregate:
         raise ValueError(
@@ -261,15 +324,18 @@ def run(config: RunConfig, *, verbose: bool = True) -> dict[str, Any]:
 
     report_cache(embed_model, verbose=verbose)
 
-    total_questions = sum(len(item["qa_pairs"]) for item in items)
-    summary = _summarize(aggregate, metric_k)
+    total_questions = len(eval_questions)
+    summary = _summarize(aggregate, metric_k, multi_answer=multi_answer)
+    metric_keys = [f"hr@{metric_k}", "mrr"]
+    if multi_answer:
+        metric_keys.append(f"partial_hr@{metric_k}")
     comparisons = compare_to_baselines(
         aggregate,
         target="Dynamic Semantic",
-        metric_keys=[f"hr@{metric_k}", "mrr"],
+        metric_keys=metric_keys,
     )
     if verbose:
-        _print_table(summary, metric_k)
+        _print_table(summary, metric_k, multi_answer=multi_answer)
         if comparisons:
             print()
             for line in format_comparisons(comparisons):
@@ -278,7 +344,7 @@ def run(config: RunConfig, *, verbose: bool = True) -> dict[str, Any]:
 
     result = {
         "config": _config_payload(config, embedding_config),
-        "dataset": {"name": config.dataset, "docs": len(items), "questions": total_questions},
+        "dataset": {"name": config.dataset, "docs": len(corpus_items), "questions": total_questions},
         "summary": summary,
         "aggregate": {name: [dict(m) for m in rows] for name, rows in aggregate.items()},
     }
@@ -292,6 +358,7 @@ def run(config: RunConfig, *, verbose: bool = True) -> dict[str, Any]:
         }
     if tuned_manifest:
         result["tuned"] = {
+            "source_dataset": config.tuned_dataset or config.dataset,
             "created_at": tuned_manifest.get("created_at"),
             "metrics_train": tuned_manifest.get("metrics_train"),
             "metrics_val": tuned_manifest.get("metrics_val"),
@@ -301,39 +368,51 @@ def run(config: RunConfig, *, verbose: bool = True) -> dict[str, Any]:
     return result
 
 
-def _summarize(aggregate: dict[str, list[dict]], metric_k: int) -> list[dict[str, Any]]:
+def _summarize(
+    aggregate: dict[str, list[dict]], metric_k: int, *, multi_answer: bool = False
+) -> list[dict[str, Any]]:
     rows = []
     for name, metrics in aggregate.items():
         if not metrics:
             continue
-        rows.append(
-            {
-                "strategy": name,
-                "tokens": float(np.mean([m["tokens"] for m in metrics])),
-                f"hr@{metric_k}": float(np.mean([m[f"hr@{metric_k}"] for m in metrics])),
-                "mrr": float(np.mean([m["mrr"] for m in metrics])),
-                f"precision@{metric_k}": float(np.mean([m[f"precision@{metric_k}"] for m in metrics])),
-                f"ndcg@{metric_k}": float(np.mean([m[f"ndcg@{metric_k}"] for m in metrics])),
-            }
-        )
+        row = {
+            "strategy": name,
+            "tokens": float(np.mean([m["tokens"] for m in metrics])),
+            f"hr@{metric_k}": float(np.mean([m[f"hr@{metric_k}"] for m in metrics])),
+            "mrr": float(np.mean([m["mrr"] for m in metrics])),
+            f"precision@{metric_k}": float(np.mean([m[f"precision@{metric_k}"] for m in metrics])),
+            f"ndcg@{metric_k}": float(np.mean([m[f"ndcg@{metric_k}"] for m in metrics])),
+        }
+        if multi_answer:
+            partial_key = f"partial_hr@{metric_k}"
+            if partial_key in metrics[0]:
+                row[partial_key] = float(np.mean([m[partial_key] for m in metrics]))
+        rows.append(row)
     return rows
 
 
-def _print_table(summary: list[dict[str, Any]], metric_k: int) -> None:
+def _print_table(
+    summary: list[dict[str, Any]], metric_k: int, *, multi_answer: bool = False
+) -> None:
     if not summary:
         print("No results.")
         return
     suffix = f"@{metric_k}"
-    print("-" * 85)
+    partial_hdr = f" | {f'pHR{suffix}':>7}" if multi_answer else ""
+    print("-" * (85 + len(partial_hdr)))
     print(
         f"{'Strategy':20} | {'Tokens':>7} | {f'HR{suffix}':>7} | "
-        f"{'MRR':>7} | {f'P{suffix}':>7} | {f'NDCG{suffix}':>8}"
+        f"{'MRR':>7} | {f'P{suffix}':>7} | {f'NDCG{suffix}':>8}{partial_hdr}"
     )
-    print("-" * 85)
+    print("-" * (85 + len(partial_hdr)))
     for row in summary:
+        partial_val = ""
+        if multi_answer:
+            partial_val = f" | {row.get(f'partial_hr@{metric_k}', 0.0):7.4f}"
         print(
             f"{row['strategy']:20} | {row['tokens']:7.1f} | {row[f'hr@{metric_k}']:7.4f} | "
-            f"{row['mrr']:7.4f} | {row[f'precision@{metric_k}']:7.4f} | {row[f'ndcg@{metric_k}']:8.4f}"
+            f"{row['mrr']:7.4f} | {row[f'precision@{metric_k}']:7.4f} | "
+            f"{row[f'ndcg@{metric_k}']:8.4f}{partial_val}"
         )
 
 
@@ -349,6 +428,8 @@ def _config_payload(config: RunConfig, embedding_config) -> dict[str, Any]:
         "top_k": config.top_k,
         "metric_k": config.effective_metric_k,
     }
+    if config.tuned_dataset:
+        payload["tuned_dataset"] = config.tuned_dataset
     if config.dynamic_overrides:
         payload["dynamic_overrides"] = dict(config.dynamic_overrides)
     return payload

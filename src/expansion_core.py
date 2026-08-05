@@ -511,3 +511,46 @@ def evaluate_retrieval(
         "num_clusters": len(clusters),
         "rank": rank,
     }
+
+
+def evaluate_multi_retrieval(
+    clusters: list[ExpandedCluster],
+    answer_sentence_indices: list[int],
+    sentences: list[str],
+) -> dict:
+    """Evaluate joint multi-answer retrieval (extrahard / shared index)."""
+    if not answer_sentence_indices or any(idx < 0 for idx in answer_sentence_indices):
+        return {"hit": False, "tokens": 0, "num_clusters": len(clusters), "rank": -1, "mrr": 0.0}
+
+    ranks: list[float] = []
+    hit = True
+    for answer_idx in answer_sentence_indices:
+        rank = -1
+        for i, cluster in enumerate(clusters):
+            if cluster.start_idx <= answer_idx <= cluster.end_idx:
+                rank = i + 1
+                break
+        if rank < 0:
+            hit = False
+            ranks.append(0.0)
+        else:
+            ranks.append(1.0 / rank)
+
+    cluster_texts = []
+    for cluster in clusters:
+        parts = [
+            sentences[idx]
+            for idx in range(cluster.start_idx, cluster.end_idx + 1)
+            if 0 <= idx < len(sentences)
+        ]
+        if parts:
+            cluster_texts.append(" ".join(parts))
+    tokens = count_tokens(" ".join(cluster_texts))
+
+    return {
+        "hit": hit,
+        "tokens": tokens,
+        "num_clusters": len(clusters),
+        "rank": int(ranks[0] > 0) if ranks else -1,
+        "mrr": sum(ranks) / len(ranks),
+    }

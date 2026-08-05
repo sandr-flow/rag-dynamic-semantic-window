@@ -28,8 +28,8 @@ except ImportError:
     exit(1)
 
 from src.config import DEFAULT_CORPUS_CONFIG, DEFAULT_EXPANSION_CONFIG, DEFAULT_OPTUNA_CONFIG
-from src.corpus_data import CorpusData
-from src.expansion_core import DynamicExpansionCore, build_garbage_mask, evaluate_retrieval
+from src.corpus_data import CorpusData, global_answer_indices, is_shared_corpus, question_is_valid
+from src.expansion_core import DynamicExpansionCore, build_garbage_mask, evaluate_multi_retrieval, evaluate_retrieval
 from src.hpo_config import (
     HPOSettings,
     compute_objective_score,
@@ -161,6 +161,66 @@ def _evaluation_context(corpus: CorpusData):
     return article_lookup, garbage_masks
 
 
+def _evaluate_question(
+    corpus: CorpusData,
+    question,
+    params: dict[str, Any],
+    *,
+    target_clusters: int,
+    article_lookup: dict[int, Any],
+    garbage_masks: dict[int, np.ndarray],
+) -> dict[str, Any]:
+    resolved = _resolved_expansion_params(params)
+
+    if is_shared_corpus(corpus):
+        expander = DynamicExpansionCore(
+            neighbor_sims=corpus.global_neighbor_sims,
+            sentence_sims=question.sentence_sims,
+            top_k_indices=question.top_k_indices,
+            threshold=resolved["threshold"],
+            skip_threshold=resolved["skip_threshold"],
+            min_window=resolved["min_window"],
+            max_expand=resolved["max_expand"],
+            relevance_threshold_pct=resolved["relevance_threshold_pct"],
+            merge_gap=resolved["merge_gap"],
+            target_clusters=target_clusters,
+            garbage_mask=corpus.global_garbage_mask,
+            segment_ids=corpus.global_segment_ids,
+        )
+        clusters = expander.expand_and_retrieve()
+        return evaluate_multi_retrieval(
+            clusters=clusters,
+            answer_sentence_indices=global_answer_indices(question, corpus),
+            sentences=corpus.global_sentences,
+        )
+
+    article = article_lookup.get(question.article_id)
+    if not article:
+        return {"hit": False, "tokens": 0, "num_clusters": 0, "rank": -1, "mrr": 0.0}
+
+    expander = DynamicExpansionCore(
+        neighbor_sims=article.neighbor_sims,
+        sentence_sims=question.sentence_sims,
+        top_k_indices=question.top_k_indices,
+        threshold=resolved["threshold"],
+        skip_threshold=resolved["skip_threshold"],
+        min_window=resolved["min_window"],
+        max_expand=resolved["max_expand"],
+        relevance_threshold_pct=resolved["relevance_threshold_pct"],
+        merge_gap=resolved["merge_gap"],
+        target_clusters=target_clusters,
+        garbage_mask=garbage_masks.get(question.article_id),
+    )
+    clusters = expander.expand_and_retrieve()
+    metrics = evaluate_retrieval(
+        clusters=clusters,
+        answer_sentence_idx=question.answer_sentence_idx,
+        sentences=article.sentences,
+    )
+    metrics["mrr"] = (1.0 / metrics["rank"]) if metrics["hit"] and metrics["rank"] > 0 else 0.0
+    return metrics
+
+
 def evaluate_params(
     corpus: CorpusData,
     params: dict[str, Any],
@@ -176,7 +236,6 @@ def evaluate_params(
 
     hpo_settings = hpo_settings or load_hpo_settings()
     objective_policy = hpo_settings.objective
-    resolved = _resolved_expansion_params(params)
 
     total_hits = 0
     total_mrr = 0.0
@@ -184,35 +243,18 @@ def evaluate_params(
     num_valid_questions = 0
 
     for question in corpus.questions:
-        article = article_lookup.get(question.article_id)
-        if not article:
-            continue
-
-        expander = DynamicExpansionCore(
-            neighbor_sims=article.neighbor_sims,
-            sentence_sims=question.sentence_sims,
-            top_k_indices=question.top_k_indices,
-            threshold=resolved["threshold"],
-            skip_threshold=resolved["skip_threshold"],
-            min_window=resolved["min_window"],
-            max_expand=resolved["max_expand"],
-            relevance_threshold_pct=resolved["relevance_threshold_pct"],
-            merge_gap=resolved["merge_gap"],
+        metrics = _evaluate_question(
+            corpus,
+            question,
+            params,
             target_clusters=target_clusters,
-            garbage_mask=garbage_masks.get(question.article_id),
+            article_lookup=article_lookup,
+            garbage_masks=garbage_masks,
         )
 
-        clusters = expander.expand_and_retrieve()
-        metrics = evaluate_retrieval(
-            clusters=clusters,
-            answer_sentence_idx=question.answer_sentence_idx,
-            sentences=article.sentences,
-        )
-
-        if question.answer_sentence_idx >= 0:
+        if question_is_valid(question, corpus):
             total_hits += int(metrics["hit"])
-            if metrics["hit"] and metrics["rank"] > 0:
-                total_mrr += 1.0 / metrics["rank"]
+            total_mrr += metrics.get("mrr", 0.0)
             num_valid_questions += 1
         total_tokens += metrics["tokens"]
 
