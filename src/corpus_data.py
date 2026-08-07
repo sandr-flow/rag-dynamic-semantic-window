@@ -275,9 +275,10 @@ def subset_corpus_by_article_ids(corpus: CorpusData, article_ids: set[int]) -> C
 
     questions: list[QuestionData] = []
     for question in corpus.questions:
-        if not question.source_article_ids:
-            continue
-        if not all(article_id in selected for article_id in question.source_article_ids):
+        # Compound questions carry every source doc; single-answer ones only
+        # live in their own article. Both must survive a shared-corpus subset.
+        source_ids = question.source_article_ids or [question.article_id]
+        if not all(article_id in selected for article_id in source_ids):
             continue
         questions.append(_reindex_question_for_shared(question, corpus, global_embeddings))
 

@@ -1,0 +1,6 @@
+# HR first, MRR second, tokens as the last tie-breaker.
+# Default mrr_weight=0.01 made MRR worth less than a 3-token saving, so the
+# tuner traded away the metric the method actually wins on.
+objective:
+  mrr_weight: 0.4
+  token_tiebreak_fraction: 0.05

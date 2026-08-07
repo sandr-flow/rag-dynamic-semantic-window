@@ -118,6 +118,7 @@ def _cmd_tune(args: argparse.Namespace) -> int:
         train_ratio=args.train_ratio,
         split_seed=args.split_seed,
         hpo_config=args.hpo_config,
+        index_mode=args.index_mode,
     )
     return 0
 
@@ -242,6 +243,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--hpo-config",
         default=None,
         help="YAML/JSON file with search_space and objective policy overrides.",
+    )
+    p_tune.add_argument(
+        "--index-mode",
+        choices=["per_document", "shared"],
+        default="per_document",
+        help=(
+            "Retrieval mode the objective is computed in. Use 'shared' to tune "
+            "under the same cross-document competition the shared benchmark "
+            "measures. Extrahard datasets are always shared."
+        ),
     )
 
     p_run = sub.add_parser("run", help="Run one combination non-interactively.")

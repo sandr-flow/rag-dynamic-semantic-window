@@ -180,6 +180,116 @@ def _build_corpus(
     )
 
 
+def _build_shared_corpus(
+    items: list[dict],
+    embed_model,
+    *,
+    source: str,
+    embedding_provider: str,
+    embedding_model: str,
+    phantom_window: int,
+    top_k: int = 100,
+    min_sentences: int = 10,
+) -> CorpusData:
+    """Precompute a shared-index corpus for ordinary single-answer datasets.
+
+    Same documents and questions as :func:`_build_corpus`, but query
+    similarities are computed against the whole corpus rather than the source
+    article, so HPO optimizes under the cross-document competition the shared
+    benchmark actually measures. Questions keep ``source_article_ids`` empty;
+    ``global_answer_indices`` then resolves their single answer through
+    ``article_offsets``.
+    """
+    from src.config import DEFAULT_EXPANSION_CONFIG
+
+    articles = _embed_articles(
+        items, embed_model, phantom_window=phantom_window, min_sentences=min_sentences
+    )
+    if not articles:
+        raise ValueError("Shared tuning needs at least one chunkable corpus document")
+
+    (
+        global_sentences,
+        global_neighbor_sims,
+        global_garbage_mask,
+        global_segment_ids,
+        article_offsets,
+    ) = build_shared_global_arrays(
+        articles,
+        [items[article.article_id] for article in articles],
+        min_chunk_length=DEFAULT_EXPANSION_CONFIG.min_chunk_length,
+    )
+    global_embeddings = np.concatenate([article.embeddings for article in articles], axis=0)
+    print(
+        f"  [INFO] shared index: {len(global_sentences)} sentences "
+        f"across {len(articles)} docs",
+        flush=True,
+    )
+
+    pending: list[tuple[ArticleData, dict]] = []
+    for article in articles:
+        for qa in items[article.article_id].get("qa_pairs", []):
+            pending.append((article, qa))
+
+    question_embeddings = _embed_texts_batched(
+        embed_model, [qa["question"] for _, qa in pending], label="questions"
+    )
+
+    questions: list[QuestionData] = []
+    total_pending = len(pending)
+    sim_log_stride = max(1, total_pending // 10)
+    if total_pending:
+        print(
+            f"  [INFO] computing global similarities for {total_pending} questions...",
+            flush=True,
+        )
+    for qid, ((article, qa), raw_embedding) in enumerate(
+        zip(pending, question_embeddings, strict=True)
+    ):
+        answer_sentence = qa.get("answer_sentence", qa.get("answer", ""))
+        q_embedding = np.array(raw_embedding, dtype=np.float32)
+        sentence_sims = _question_sims(q_embedding, global_embeddings)
+        k = min(top_k, len(sentence_sims))
+        top_k_indices = np.argsort(sentence_sims)[::-1][:k].astype(np.int32)
+        questions.append(
+            QuestionData(
+                question_id=qid,
+                article_id=article.article_id,
+                question=qa["question"],
+                answer_sentence=answer_sentence,
+                # Local index; global_answer_indices adds the article offset.
+                answer_sentence_idx=find_answer_sentence_idx(
+                    article.sentences, answer_sentence
+                ),
+                embedding=q_embedding,
+                sentence_sims=sentence_sims,
+                top_k_indices=top_k_indices,
+            )
+        )
+        if (qid + 1) % sim_log_stride == 0 or qid + 1 == total_pending:
+            print(f"  [INFO] similarities {qid + 1}/{total_pending} questions", flush=True)
+
+    embed_dim = articles[0].embeddings.shape[1] if articles else 384
+    return CorpusData(
+        articles=articles,
+        questions=questions,
+        embed_dim=embed_dim,
+        top_k=top_k,
+        source=source,
+        embedding_provider=embedding_provider,
+        embedding_model=embedding_model,
+        phantom_window=phantom_window,
+        embedding_mode=_embedding_mode(phantom_window),
+        adjacency_space="clean",
+        kind="shared",
+        global_sentences=global_sentences,
+        global_neighbor_sims=global_neighbor_sims,
+        global_garbage_mask=global_garbage_mask,
+        global_segment_ids=global_segment_ids,
+        article_offsets=article_offsets,
+    )
+
+
 def _build_extrahard_corpus(
     items: list[dict],
     pairs: list[dict],
@@ -318,8 +428,14 @@ def _embedding_mode(phantom_window: int) -> str:
     return f"phantom_w{phantom_window}__adj_clean"
 
 
-def _corpus_cache_path(dataset: str, embedding: str, phantom_window: int) -> Path:
+def _corpus_cache_path(
+    dataset: str, embedding: str, phantom_window: int, index_mode: str = "per_document"
+) -> Path:
     key = f"{artifacts.tuned_key(dataset, embedding)}__{_embedding_mode(phantom_window)}"
+    # Shared corpora carry different question sims; keep them in their own file
+    # so a per-document cache is never silently reused (and vice versa).
+    if index_mode == "shared":
+        key = f"{key}__shared"
     return paths.CORPUS_CACHE_DIR / f"{key}.pkl"
 
 
@@ -329,8 +445,9 @@ def _load_or_build_corpus(
     *,
     rebuild: bool,
     phantom_window: int,
+    index_mode: str = "per_document",
 ) -> CorpusData:
-    cache_path = _corpus_cache_path(dataset, embedding, phantom_window)
+    cache_path = _corpus_cache_path(dataset, embedding, phantom_window, index_mode)
     if cache_path.exists() and not rebuild:
         print(f"[INFO] Reusing cached corpus: {cache_path}")
         with open(cache_path, "rb") as f:
@@ -339,7 +456,21 @@ def _load_or_build_corpus(
     embed_model, embedding_config = prepare_embed_model(embedding)
 
     extrahard = artifacts.is_extrahard(dataset)
-    if extrahard:
+    if not extrahard and index_mode == "shared":
+        items = drop_unchunkable_items(artifacts.load_dataset_items(dataset))
+        print(
+            f"[INFO] Building shared corpus for {dataset} + {embedding} "
+            f"mode={_embedding_mode(phantom_window)} ({len(items)} docs)..."
+        )
+        corpus = _build_shared_corpus(
+            items,
+            embed_model,
+            source=dataset,
+            embedding_provider=embedding_config.provider,
+            embedding_model=embedding_config.model,
+            phantom_window=phantom_window,
+        )
+    elif extrahard:
         items = drop_unchunkable_items(artifacts.load_corpus_items(dataset))
         pairs = artifacts.load_eval_questions(dataset)
         print(
@@ -414,6 +545,7 @@ def tune(
     train_ratio: float = 0.70,
     split_seed: int = 42,
     hpo_config: str | None = None,
+    index_mode: str = "per_document",
 ) -> dict:
     """Run per-domain Optuna HPO and save a tuned-params artifact."""
     try:
@@ -429,6 +561,7 @@ def tune(
         embedding,
         rebuild=rebuild_corpus,
         phantom_window=phantom_window,
+        index_mode=index_mode,
     )
     _report_adjacency_distribution(corpus)
     train_corpus, val_corpus = split_corpus_by_documents(
