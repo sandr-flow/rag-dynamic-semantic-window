@@ -19,6 +19,12 @@ from . import artifacts, paths
 
 load_dotenv()
 
+# Windows consoles often default to cp1252; Wikipedia titles are UTF-8.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 
 def _cmd_list(_: argparse.Namespace) -> int:
     datasets = artifacts.list_datasets()
@@ -73,6 +79,18 @@ def _cmd_harden_dataset(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_extrahard_dataset(args: argparse.Namespace) -> int:
+    from .prepare import extrahard_dataset
+
+    extrahard_dataset(
+        source_name=args.source_name,
+        target_name=args.name,
+        partners_per_question=args.partners_per_question,
+        pair_seed=args.seed,
+    )
+    return 0
+
+
 def _cmd_prepare_embedding(args: argparse.Namespace) -> int:
     from .prepare import prepare_embedding
 
@@ -100,6 +118,7 @@ def _cmd_tune(args: argparse.Namespace) -> int:
         train_ratio=args.train_ratio,
         split_seed=args.split_seed,
         hpo_config=args.hpo_config,
+        index_mode=args.index_mode,
     )
     return 0
 
@@ -127,6 +146,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         top_k=args.top_k,
         metric_k=args.metric_k,
         limit=args.limit,
+        tuned_dataset=args.tuned_dataset,
         dynamic_overrides=dynamic_overrides,
     )
     run(config)
@@ -188,6 +208,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Max content-token overlap between question and answer sentence.",
     )
 
+    p_extra = sub.add_parser(
+        "extrahard-dataset",
+        help="Build cross-document compound questions from an existing dataset.",
+    )
+    p_extra.add_argument("--source-name", required=True, help="Existing QA dataset artifact.")
+    p_extra.add_argument("--name", required=True, help="Name for the extrahard artifact.")
+    p_extra.add_argument(
+        "--partners-per-question",
+        type=int,
+        default=2,
+        help="Random cross-doc partners sampled per base question.",
+    )
+    p_extra.add_argument("--seed", type=int, default=42, help="RNG seed for pair sampling.")
+
     p_emb = sub.add_parser("prepare-embedding", help="Register/warm an embedding model.")
     p_emb.add_argument("--name", required=True)
     p_emb.add_argument("--provider", required=True)
@@ -210,6 +244,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="YAML/JSON file with search_space and objective policy overrides.",
     )
+    p_tune.add_argument(
+        "--index-mode",
+        choices=["per_document", "shared"],
+        default="per_document",
+        help=(
+            "Retrieval mode the objective is computed in. Use 'shared' to tune "
+            "under the same cross-document competition the shared benchmark "
+            "measures. Extrahard datasets are always shared."
+        ),
+    )
 
     p_run = sub.add_parser("run", help="Run one combination non-interactively.")
     p_run.add_argument("--dataset", required=True)
@@ -217,6 +261,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--strategies", default="default")
     p_run.add_argument("--index-mode", choices=["shared", "per_document"], default="shared")
     p_run.add_argument("--params", choices=["default", "tuned"], default="default")
+    p_run.add_argument(
+        "--tuned-dataset",
+        default=None,
+        help="With --params tuned: load tuned artifact from this dataset name "
+        "instead of --dataset (same --embedding).",
+    )
     p_run.add_argument("--top-k", type=int, default=5)
     p_run.add_argument("--metric-k", type=int, default=None)
     p_run.add_argument("--limit", type=int, default=None)
@@ -249,6 +299,7 @@ _HANDLERS = {
     "list": _cmd_list,
     "prepare-dataset": _cmd_prepare_dataset,
     "harden-dataset": _cmd_harden_dataset,
+    "extrahard-dataset": _cmd_extrahard_dataset,
     "prepare-embedding": _cmd_prepare_embedding,
     "tune": _cmd_tune,
     "run": _cmd_run,

@@ -39,8 +39,15 @@ class DatasetInfo:
     num_items: int
     num_questions: int
     created_at: str
+    kind: str = "standard"
+    corpus_dataset: str | None = None
 
     def label(self) -> str:
+        if self.kind == "extrahard" and self.corpus_dataset:
+            return (
+                f"{self.name}  (extrahard:{self.corpus_dataset}, "
+                f"{self.num_questions} compound q, corpus {self.num_items} docs)"
+            )
         return (
             f"{self.name}  ({self.source}, qa={self.qa_model}, "
             f"{self.num_items} docs / {self.num_questions} q)"
@@ -98,6 +105,95 @@ def save_dataset(
     return DatasetInfo(**manifest)
 
 
+def _dataset_info_from_manifest(data: dict[str, Any]) -> DatasetInfo:
+    fields = {k: data[k] for k in DatasetInfo.__annotations__ if k in data}
+    if "kind" not in fields:
+        fields["kind"] = data.get("kind", "standard")
+    if "corpus_dataset" not in fields:
+        fields["corpus_dataset"] = data.get("corpus_dataset")
+    return DatasetInfo(**fields)
+
+
+def load_manifest(name: str) -> dict[str, Any]:
+    """Load the full dataset manifest (including extrahard metadata)."""
+    manifest_path = dataset_dir(name) / "manifest.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(
+            f"Dataset '{name}' not found. Prepare it first: "
+            f"python -m stand prepare-dataset ..."
+        )
+    with open(manifest_path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def is_extrahard(name: str) -> bool:
+    return load_manifest(name).get("kind") == "extrahard"
+
+
+def load_corpus_items(name: str, limit: int | None = None) -> list[dict[str, Any]]:
+    """Load article items to index (corpus) for a dataset or extrahard artifact."""
+    manifest = load_manifest(name)
+    corpus_name = manifest.get("corpus_dataset") if manifest.get("kind") == "extrahard" else name
+    return load_dataset_items(corpus_name, limit=limit)
+
+
+def load_eval_questions(name: str, limit: int | None = None) -> list[dict[str, Any]]:
+    """Load evaluation questions (flat qa list or extrahard compound pairs)."""
+    manifest = load_manifest(name)
+    if manifest.get("kind") == "extrahard":
+        pairs_path = dataset_dir(name) / "pairs.jsonl"
+        if not pairs_path.exists():
+            raise FileNotFoundError(f"Extrahard dataset '{name}' is missing pairs.jsonl")
+        pairs: list[dict[str, Any]] = []
+        with open(pairs_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    pairs.append(json.loads(line))
+        return pairs[:limit] if limit else pairs
+
+    items = load_dataset_items(name, limit=limit)
+    return [qa for item in items for qa in item.get("qa_pairs", [])]
+
+
+def save_extrahard_dataset(
+    name: str,
+    pairs: list[dict[str, Any]],
+    *,
+    source_name: str,
+    corpus_dataset: str,
+    corpus_num_items: int,
+    partners_per_question: int,
+    pair_seed: int,
+) -> DatasetInfo:
+    """Write an extrahard artifact (pairs.jsonl + manifest.json)."""
+    target = dataset_dir(name)
+    target.mkdir(parents=True, exist_ok=True)
+
+    with open(target / "pairs.jsonl", "w", encoding="utf-8") as f:
+        for pair in pairs:
+            json.dump(pair, f, ensure_ascii=False)
+            f.write("\n")
+
+    manifest = {
+        "name": slugify(name),
+        "kind": "extrahard",
+        "source": f"extrahard:{slugify(source_name)}",
+        "corpus_dataset": slugify(corpus_dataset),
+        "qa_model": "combinatorial",
+        "num_items": corpus_num_items,
+        "num_questions": len(pairs),
+        "pairing": "cross_document",
+        "partners_per_question": partners_per_question,
+        "pair_seed": pair_seed,
+        "created_at": _now(),
+    }
+    with open(target / "manifest.json", "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2, ensure_ascii=False)
+
+    return _dataset_info_from_manifest(manifest)
+
+
 def list_datasets() -> list[DatasetInfo]:
     """Return all prepared datasets, newest first."""
     if not paths.DATASETS_DIR.exists():
@@ -107,7 +203,7 @@ def list_datasets() -> list[DatasetInfo]:
         try:
             with open(manifest_path, encoding="utf-8") as f:
                 data = json.load(f)
-            infos.append(DatasetInfo(**{k: data[k] for k in DatasetInfo.__annotations__}))
+            infos.append(_dataset_info_from_manifest(data))
         except (OSError, KeyError, json.JSONDecodeError):
             continue
     return sorted(infos, key=lambda info: info.created_at, reverse=True)
@@ -119,7 +215,7 @@ def get_dataset(name: str) -> DatasetInfo | None:
         return None
     with open(manifest_path, encoding="utf-8") as f:
         data = json.load(f)
-    return DatasetInfo(**{k: data[k] for k in DatasetInfo.__annotations__})
+    return _dataset_info_from_manifest(data)
 
 
 def load_dataset_items(name: str, limit: int | None = None) -> list[dict[str, Any]]:

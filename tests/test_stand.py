@@ -317,6 +317,26 @@ def test_runner_second_run_hits_embedding_cache(temp_artifacts):
     assert stats["hits"] > 0
 
 
+def test_resolve_tuned_from_other_dataset(temp_artifacts):
+    from stand.runner import _resolve_tuned
+
+    artifacts.save_tuned(
+        "extrahard_src",
+        "mock",
+        {"threshold": 0.42, "phantom_window": 1},
+        {"hit_rate": 0.5},
+    )
+    config = RunConfig(
+        dataset="wiki_hard",
+        embedding="mock",
+        params="tuned",
+        tuned_dataset="extrahard_src",
+    )
+    params, tuned = _resolve_tuned(config)
+    assert params["threshold"] == 0.42
+    assert tuned["dataset"] == "extrahard_src"
+
+
 def test_runner_rejects_unknown_dynamic_overrides(temp_artifacts):
     from stand.runner import _resolve_tuned
 
@@ -366,6 +386,64 @@ def test_runner_seeds_only_overrides(temp_artifacts):
     assert row["strategy"] == "Dynamic Semantic"
     full_doc_tokens = count_tokens(items[0]["text"])
     assert 0 < row["tokens"] < full_doc_tokens
+
+
+def test_runner_extrahard_requires_shared_index(temp_artifacts):
+    from stand.extrahard_pairs import build_cross_document_pairs
+    from stand.runner import run
+
+    items = [
+        {
+            "id": 0,
+            "title": "One",
+            "text": "Alpha beta. Second line.",
+            "qa_pairs": [
+                {"question": "Q one?", "answer": "Alpha", "answer_sentence": "Alpha beta."},
+            ],
+        },
+        {
+            "id": 1,
+            "title": "Two",
+            "text": "Gamma delta. Fourth line.",
+            "qa_pairs": [
+                {"question": "Q two?", "answer": "Gamma", "answer_sentence": "Gamma delta."},
+            ],
+        },
+    ]
+    artifacts.save_dataset("corp", items, source="custom", qa_model="custom")
+    pairs = build_cross_document_pairs(items, partners_per_question=1, seed=0)
+    artifacts.save_extrahard_dataset(
+        "extra",
+        pairs,
+        source_name="corp",
+        corpus_dataset="corp",
+        corpus_num_items=len(items),
+        partners_per_question=1,
+        pair_seed=0,
+    )
+
+    config = RunConfig(
+        dataset="extra",
+        embedding="mock",
+        strategies=["naive"],
+        index_mode="per_document",
+        top_k=2,
+    )
+    with pytest.raises(ValueError, match="requires --index-mode shared"):
+        run(config, verbose=False)
+
+    result = run(
+        RunConfig(
+            dataset="extra",
+            embedding="mock",
+            strategies=["naive"],
+            index_mode="shared",
+            top_k=2,
+        ),
+        verbose=False,
+    )
+    assert result["dataset"]["questions"] == len(pairs)
+    assert "partial_hr@2" in result["summary"][0]
 
 
 def test_document_metadata_is_excluded_from_embed_content():

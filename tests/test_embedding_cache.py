@@ -72,6 +72,22 @@ def test_query_and_text_embeddings_are_namespaced(store_path):
     assert len(inner.query_calls) == 1
 
 
+def test_prewarm_queries_batches_misses_and_fills_query_cache(store_path):
+    inner = FakeModel()
+    model = CachingEmbedding(inner=inner, store=EmbeddingStore(store_path))
+    model.get_query_embedding("warm")
+
+    missed = model.prewarm_queries(["warm", "cold one", "cold two", "cold one"])
+
+    assert missed == 2
+    assert inner.query_calls == ["warm", "cold one", "cold two"]
+    # Subsequent retrieval-time lookups are pure cache hits.
+    model.get_query_embedding("cold one")
+    model.get_query_embedding("cold two")
+    assert inner.query_calls == ["warm", "cold one", "cold two"]
+    assert model.prewarm_queries(["warm", "cold one"]) == 0
+
+
 def test_cache_persists_across_store_instances(store_path):
     warm_inner = FakeModel()
     warm = CachingEmbedding(inner=warm_inner, store=EmbeddingStore(store_path))

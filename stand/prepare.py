@@ -251,3 +251,54 @@ def prepare_embedding(
     artifacts.register_embedding(info)
     print(f"[OK] Embedding registered: {info.label()}")
     return info
+
+
+def extrahard_dataset(
+    *,
+    source_name: str,
+    target_name: str,
+    partners_per_question: int = 2,
+    pair_seed: int = 42,
+) -> artifacts.DatasetInfo:
+    """Build cross-document compound questions from an existing QA dataset."""
+    from .corpus_filter import drop_unchunkable_items
+    from .extrahard_pairs import build_cross_document_pairs
+
+    corpus_items = artifacts.load_dataset_items(source_name)
+    chunkable = drop_unchunkable_items(corpus_items, verbose=True)
+    n_dropped = len(corpus_items) - len(chunkable)
+    if n_dropped:
+        print(f"[INFO] excluded {n_dropped} unchunkable doc(s) from pairing corpus")
+
+    print(
+        f"[INFO] Building cross-document pairs from '{source_name}' "
+        f"({partners_per_question} partners/question, seed={pair_seed})..."
+    )
+    pairs = build_cross_document_pairs(
+        chunkable,
+        partners_per_question=partners_per_question,
+        seed=pair_seed,
+    )
+    if not pairs:
+        raise ValueError("No valid cross-document pairs were produced")
+
+    valid_doc_ids = {str(item.get("id", idx)) for idx, item in enumerate(chunkable)}
+    pairs = [
+        p
+        for p in pairs
+        if p["source_docs"][0] in valid_doc_ids and p["source_docs"][1] in valid_doc_ids
+    ]
+
+    info = artifacts.save_extrahard_dataset(
+        target_name,
+        pairs,
+        source_name=source_name,
+        corpus_dataset=source_name,
+        corpus_num_items=len(chunkable),
+        partners_per_question=partners_per_question,
+        pair_seed=pair_seed,
+    )
+    print(f"[OK] Built {len(pairs)} compound questions from {len(chunkable)} docs")
+    print(f"\n[OK] Extrahard dataset artifact saved: {info.label()}")
+    print(f"     {artifacts.dataset_dir(target_name)}")
+    return info

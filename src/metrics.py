@@ -145,6 +145,118 @@ def ndcg_at_k(
     return dcg / idcg if idcg > 0 else 0.0
 
 
+def joint_hit_rate(retrieved_texts: list[str], answer_sentences: list[str], k: int) -> float:
+    """1.0 when every answer sentence appears in top-k chunks."""
+    if not answer_sentences:
+        return 0.0
+    top_k = retrieved_texts[:k]
+    return float(
+        all(any(_contains_answer(chunk, answer) for chunk in top_k) for answer in answer_sentences)
+    )
+
+
+def partial_hit_rate(retrieved_texts: list[str], answer_sentences: list[str], k: int) -> float:
+    """1.0 when at least one answer sentence appears in top-k chunks."""
+    if not answer_sentences:
+        return 0.0
+    top_k = retrieved_texts[:k]
+    return float(
+        any(
+            any(_contains_answer(chunk, answer) for chunk in top_k)
+            for answer in answer_sentences
+        )
+    )
+
+
+def answer_recall_at_k(retrieved_texts: list[str], answer_sentences: list[str], k: int) -> float:
+    """Fraction of answer sentences found in top-k chunks."""
+    if not answer_sentences:
+        return 0.0
+    top_k = retrieved_texts[:k]
+    hits = sum(
+        1
+        for answer in answer_sentences
+        if any(_contains_answer(chunk, answer) for chunk in top_k)
+    )
+    return hits / len(answer_sentences)
+
+
+def mrr_multi(retrieved_texts: list[str], answer_sentences: list[str]) -> float:
+    """Mean per-answer MRR."""
+    if not answer_sentences:
+        return 0.0
+    return sum(mrr(retrieved_texts, answer) for answer in answer_sentences) / len(answer_sentences)
+
+
+def mrr_min_multi(retrieved_texts: list[str], answer_sentences: list[str]) -> float:
+    """Minimum per-answer MRR (weakest answer dominates)."""
+    if not answer_sentences:
+        return 0.0
+    return min(mrr(retrieved_texts, answer) for answer in answer_sentences)
+
+
+def precision_at_k_multi(
+    retrieved_texts: list[str], answer_sentences: list[str], k: int
+) -> float:
+    """Fraction of top-k slots that contain any still-uncovered answer."""
+    top_k = retrieved_texts[:k]
+    if not top_k:
+        return 0.0
+    hits = 0
+    found: set[int] = set()
+    for chunk in top_k:
+        for idx, answer in enumerate(answer_sentences):
+            if idx in found:
+                continue
+            if _contains_answer(chunk, answer):
+                hits += 1
+                found.add(idx)
+                break
+    return hits / k
+
+
+def ndcg_at_k_multi(
+    retrieved_texts: list[str], answer_sentences: list[str], k: int
+) -> float:
+    """NDCG@k with one relevant hit per distinct answer sentence."""
+    top_k = retrieved_texts[:k]
+    if not top_k or not answer_sentences:
+        return 0.0
+
+    relevances = []
+    found: set[int] = set()
+    for chunk in top_k:
+        rel = 0.0
+        for idx, answer in enumerate(answer_sentences):
+            if idx in found:
+                continue
+            if _contains_answer(chunk, answer):
+                rel = 1.0
+                found.add(idx)
+                break
+        relevances.append(rel)
+
+    dcg = sum(rel / math.log2(i + 2) for i, rel in enumerate(relevances))
+    num_relevant = min(len(answer_sentences), k)
+    idcg = sum(1.0 / math.log2(i + 2) for i in range(num_relevant))
+    return dcg / idcg if idcg > 0 else 0.0
+
+
+def compute_multi_answer_metrics(
+    retrieved_texts: list[str], answer_sentences: list[str], k: int = 5
+) -> dict[str, float]:
+    """Compute retrieval metrics for compound questions with multiple answers."""
+    return {
+        f"hr@{k}": joint_hit_rate(retrieved_texts, answer_sentences, k),
+        f"partial_hr@{k}": partial_hit_rate(retrieved_texts, answer_sentences, k),
+        f"answer_recall@{k}": answer_recall_at_k(retrieved_texts, answer_sentences, k),
+        "mrr": mrr_multi(retrieved_texts, answer_sentences),
+        "mrr_min": mrr_min_multi(retrieved_texts, answer_sentences),
+        f"precision@{k}": precision_at_k_multi(retrieved_texts, answer_sentences, k),
+        f"ndcg@{k}": ndcg_at_k_multi(retrieved_texts, answer_sentences, k),
+    }
+
+
 def compute_all_metrics(
     retrieved_texts: list[str], answer_sentence: str, k: int = 5
 ) -> dict[str, float]:

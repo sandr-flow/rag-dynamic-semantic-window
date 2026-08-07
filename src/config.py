@@ -8,29 +8,25 @@ class ExpansionConfig:
     """Configuration for semantic expansion algorithm.
     
     Controls how the DynamicSemanticExpander expands context around seed nodes.
-    Values optimized via Optuna dual_constraint_v1 on QASPER dataset (trial #197).
-    Constraints: tokens <= 1300, HR >= 0.85
-    
-    Previous configs:
-        hr_max_1000tokens: threshold=0.787, skip=0.957, relevance=0.968
-        Wikipedia balanced_v3: threshold=0.939, skip=0.936, relevance=0.698
+    Shipped defaults match Optuna best on wiki_100_qa_hard + openai-small
+    (text-embedding-3-small, phantom_w1, clean adjacency).
     """
     
-    # Core expansion thresholds (failures_hr_max optimized, trial #219)
-    threshold: float = 0.96
+    # Core expansion thresholds (wiki_100_qa_hard + openai-small, tuned 2026-07-04)
+    threshold: float = 0.399
     """Minimum cosine similarity for expansion beyond min_window."""
     
-    skip_threshold: float = 0.827
+    skip_threshold: float = 0.669
     """Threshold for sentence skipping (bridging low-similarity gaps)."""
     
-    relevance_threshold_pct: float = 0.684
+    relevance_threshold_pct: float = 0.579
     """Query relevance threshold as percentage of max seed score."""
     
     # Window size limits
-    max_expand: int = 4
+    max_expand: int = 2
     """Maximum sentences to expand in each direction from seed."""
     
-    min_window: int = 1
+    min_window: int = 0
     """Minimum neighbors to always include."""
     
     min_chunk_length: int = 20
@@ -40,7 +36,7 @@ class ExpansionConfig:
     target_clusters: int = 5
     """Target number of clusters for deduplication and backfill."""
     
-    merge_gap: int = 2
+    merge_gap: int = 1
     """Maximum gap between clusters to merge."""
 
 
