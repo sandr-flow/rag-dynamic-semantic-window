@@ -180,9 +180,16 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("list", help="List prepared datasets, embeddings, and tuned params.")
 
     p_ds = sub.add_parser("prepare-dataset", help="Build a reusable dataset artifact.")
-    p_ds.add_argument("--source", choices=["wikipedia", "qasper", "custom"], required=True)
+    p_ds.add_argument(
+        "--source", choices=["wikipedia", "qasper", "financebench", "custom"], required=True
+    )
     p_ds.add_argument("--name", required=True, help="Artifact name.")
-    p_ds.add_argument("--num-articles", type=int, default=5)
+    p_ds.add_argument(
+        "--num-articles",
+        type=int,
+        default=None,
+        help="Documents to fetch (default: 5; financebench defaults to all filings).",
+    )
     p_ds.add_argument("--min-length", type=int, default=2000)
     p_ds.add_argument("--questions-per-article", type=int, default=3)
     p_ds.add_argument("--split", default="validation", help="QASPER split.")

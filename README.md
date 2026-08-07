@@ -91,6 +91,11 @@ python -m stand prepare-dataset --source wikipedia --name wiki_100_qa \
 python -m stand prepare-dataset --source qasper --name qasper_val \
   --num-articles 30 --questions-per-article 3 --qa-provider mistral
 
+# FinanceBench open subset: 150 human-annotated questions over SEC
+# filings (PDFs downloaded and extracted once, cached under
+# data/financebench_cache/); no QA generation involved
+python -m stand prepare-dataset --source financebench --name financebench_open
+
 # Pre-labeled custom JSONL dataset
 python -m stand prepare-dataset --source custom --name my_set \
   --dataset-path data/custom_benchmark.jsonl

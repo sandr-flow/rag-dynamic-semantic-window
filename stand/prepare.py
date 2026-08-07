@@ -49,7 +49,7 @@ async def _prepare_dataset_async(
     *,
     source: str,
     name: str,
-    num_articles: int,
+    num_articles: int | None,
     min_length: int,
     questions_per_article: int,
     split: str,
@@ -65,8 +65,21 @@ async def _prepare_dataset_async(
         items = load_benchmark_dataset(dataset_path=dataset_path)
         qa_label = "custom"
         print(f"[OK] Loaded {len(items)} custom items (QA already present)")
+    elif source == "financebench":
+        from src.financebench_loader import load_financebench_items
+
+        # num_articles keeps its CLI default of 5 for the generation sources;
+        # for FinanceBench "all filings" is the sensible default, so only an
+        # explicit positive --num-articles limits the document count.
+        max_docs = num_articles if num_articles and num_articles > 0 else None
+        scope = f"first {max_docs} filings" if max_docs else "all filings"
+        print(f"[INFO] Loading FinanceBench open subset ({scope}, questions + PDFs)...")
+        items = load_financebench_items(max_docs=max_docs)
+        qa_label = "financebench:human"
+        print(f"[OK] Loaded {len(items)} filings with human-annotated QA")
     else:
         qa_label = _apply_qa_model_env(qa_provider, qa_model)
+        num_articles = num_articles or 5
         if source == "wikipedia":
             from src.wikipedia_loader import fetch_random_articles_batch
 
@@ -99,7 +112,7 @@ def prepare_dataset(
     *,
     source: str,
     name: str,
-    num_articles: int = 5,
+    num_articles: int | None = None,
     min_length: int = 2000,
     questions_per_article: int = 3,
     split: str = "validation",
