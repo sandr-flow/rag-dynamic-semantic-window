@@ -192,7 +192,74 @@ Create `.env` with the provider settings you use.
 
 Use `mock/mock:384` only for infrastructure smoke tests.
 
-## Benchmark Results (2026-07-04)
+## Benchmark Results (2026-07-05): wiki_300, cross-document
+
+Latest results on the larger `wiki_300` family: 297 English Wikipedia
+articles, embedding `openai/text-embedding-3-small`, shared index only
+(corpus-wide competition, as in production RAG). Three difficulty tiers:
+
+- `wiki_300_qa` — 889 generated single-answer questions;
+- `wiki_300_qa_hard` — 898 questions paraphrased away from the answer's
+  lexis;
+- `wiki_300_qa_extrahard` — 1775 compound cross-document questions, each
+  answered by sentences in two different articles. Multi-answer metrics:
+  HR@k counts a hit only when *all* answer documents are found,
+  partial HR@k when at least one is.
+
+Dynamic Semantic params: tuned on `wiki_300_qa_extrahard`
+(`stand tune`, Optuna, document-level split) for the hard and extrahard
+tables; library defaults on `wiki_300_qa` (no tuned run for that tier).
+
+### wiki_300_qa — shared, default params, top_k=5
+
+| Strategy | Tokens | HR@5 | MRR | P@5 | NDCG@5 |
+|----------|-------:|-----:|----:|----:|-------:|
+| Naive Chunking | 1123.0 | 0.9010 | 0.7477 | 0.1885 | 0.7852 |
+| Fixed Window | 1128.7 | 0.9618 | 0.8543 | 0.3325 | 0.8594 |
+| Token Text Splitter | 1223.4 | 0.8830 | 0.7209 | 0.1838 | 0.7609 |
+| Semantic Splitter | 1271.1 | 0.8819 | 0.7117 | 0.1773 | 0.7542 |
+| **Dynamic Semantic (default)** | **830.0** | **0.9696** | **0.8745** | 0.1946 | **0.8987** |
+
+### wiki_300_qa_hard — shared, dynamic tuned, top_k=5
+
+| Strategy | Tokens | HR@5 | MRR | P@5 | NDCG@5 |
+|----------|-------:|-----:|----:|----:|-------:|
+| Naive Chunking | 1122.7 | 0.8207 | 0.6432 | 0.1722 | 0.6863 |
+| Fixed Window | 1149.2 | 0.9154 | 0.7889 | 0.3031 | 0.8009 |
+| Token Text Splitter | 1221.4 | 0.8051 | 0.6226 | 0.1664 | 0.6676 |
+| Semantic Splitter | 1286.2 | 0.8096 | 0.6267 | 0.1628 | 0.6724 |
+| **Dynamic Semantic (tuned)** | 1264.7 | **0.9198** | **0.8353** | 0.1849 | **0.8568** |
+
+### wiki_300_qa_extrahard — shared, dynamic tuned, top_k=10
+
+| Strategy | Tokens | HR@10 | Partial HR@10 | MRR | P@10 | NDCG@10 |
+|----------|-------:|------:|--------------:|----:|-----:|--------:|
+| Naive Chunking | 2246.4 | 0.3521 | 0.9465 | 0.3699 | 0.1299 | 0.5344 |
+| Fixed Window | 2395.1 | 0.4304 | 0.9741 | 0.4537 | 0.1405 | 0.6296 |
+| Token Text Splitter | 2440.7 | 0.3431 | 0.9324 | 0.3587 | 0.1275 | 0.5209 |
+| Semantic Splitter | 2759.9 | 0.3814 | 0.9442 | 0.3771 | 0.1326 | 0.5453 |
+| **Dynamic Semantic (tuned)** | 2772.3 | **0.5870** | **0.9752** | **0.5324** | **0.1562** | **0.7276** |
+
+Reading these numbers:
+
+- On the compound cross-document tier the gap is the largest in the
+  project: Dynamic Semantic finds *both* answer documents in 58.7% of
+  questions vs 43.0% for the best baseline (+0.157 HR@10), at comparable
+  token spend.
+- On single-answer tiers the earlier picture holds: best HR/MRR/NDCG on
+  every tier; on `wiki_300_qa` this comes with ~27% fewer tokens than
+  Fixed Window.
+
+Result files:
+`results/benchmark_wiki_300_qa_shared_20260705_171504.json`,
+`results/benchmark_wiki_300_qa_hard_shared_20260705_214508.json`,
+`results/benchmark_wiki_300_qa_extrahard_shared_20260705_215946.json`.
+
+## Benchmark Results (2026-07-04): wiki_100, bge-small
+
+Previous snapshot on the smaller `wiki_100` family with the local
+`BAAI/bge-small-en-v1.5` embedding; kept for comparison across embedding
+providers and for the per-document diagnostic tables.
 
 First full results after the stage-0 validity fixes (unified expansion core,
 phantom-aligned HPO corpus, shared-mode document isolation, shared sentence
