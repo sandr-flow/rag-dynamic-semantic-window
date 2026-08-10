@@ -1,5 +1,7 @@
 """Contract tests for the shared embedding disk cache (step 2.2)."""
 
+import pickle
+
 import numpy as np
 import pytest
 
@@ -113,6 +115,59 @@ def test_unreadable_cache_file_is_rebuilt(store_path):
 
     assert result[0][0] == float(len("alpha"))
     assert len(inner.text_batches) == 1
+
+
+def test_flush_appends_a_shard_and_leaves_earlier_ones_untouched(store_path):
+    """The whole point of the shard layout: a flush costs O(new vectors)."""
+    store = EmbeddingStore(store_path, flush_every=1000)
+    store.put("k1", [1.0, 2.0])
+    store.flush()
+
+    shards = sorted((store_path.with_suffix("")).glob("shard-*.npy"))
+    assert len(shards) == 1
+    first_bytes = shards[0].read_bytes()
+
+    store.put("k2", [3.0, 4.0])
+    store.flush()
+
+    shards_after = sorted((store_path.with_suffix("")).glob("shard-*.npy"))
+    assert len(shards_after) == 2
+    # The pre-existing shard was not rewritten — that is what used to make a
+    # flush cost O(entire store).
+    assert shards_after[0].read_bytes() == first_bytes
+    assert np.allclose(store.get("k1"), [1.0, 2.0])
+    assert np.allclose(store.get("k2"), [3.0, 4.0])
+
+
+def test_legacy_pickle_store_is_migrated_into_shards(store_path):
+    legacy = {"old_key": np.array([7.0, 8.0], dtype=np.float32)}
+    with open(store_path, "wb") as f:
+        pickle.dump(legacy, f)
+
+    store = EmbeddingStore(store_path)
+    assert np.allclose(store.get("old_key"), [7.0, 8.0])
+    # The shard copy is complete, so the pickle is not kept around to double
+    # a multi-gigabyte store on disk.
+    assert not store_path.exists()
+    assert list((store_path.with_suffix("")).glob("shard-*.npy"))
+
+    # A fresh store instance reads the migrated vectors back.
+    assert np.allclose(EmbeddingStore(store_path).get("old_key"), [7.0, 8.0])
+
+
+def test_compaction_merges_shards_and_preserves_every_key(store_path):
+    store = EmbeddingStore(store_path, flush_every=1, compact_every=3)
+    for i in range(6):
+        store.put(f"k{i}", [float(i), 1.0])
+
+    shard_dir = store_path.with_suffix("")
+    assert len(list(shard_dir.glob("shard-*.npy"))) < 6
+
+    for i in range(6):
+        assert np.allclose(store.get(f"k{i}"), [float(i), 1.0]), i
+    reopened = EmbeddingStore(store_path)
+    assert len(reopened) == 6
+    assert np.allclose(reopened.get("k5"), [5.0, 1.0])
 
 
 def test_embedding_cache_enabled_env_switch(monkeypatch):

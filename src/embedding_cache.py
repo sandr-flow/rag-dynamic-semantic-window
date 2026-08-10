@@ -15,14 +15,28 @@ Query embeddings are namespaced separately from text embeddings: models such
 as bge prepend a query instruction, so the same string yields different
 vectors in the two modes.
 
-Vectors are stored as float32 (the pipeline dtype). One store file per
-(provider, model); writes are batched and atomic (temp file + ``os.replace``).
+Storage is a directory of append-only shards per (provider, model): each
+flush writes only the vectors accumulated since the previous one, as a
+``shard-*.npy`` matrix plus a ``shard-*.json`` key list. Rewriting the whole
+store on every flush (the previous single-pickle layout) cost O(store) per
+flush and therefore O(store x new vectors) per run — 118s per flush once the
+FinanceBench corpus pushed the store past 6 GB. Appending costs O(new).
+
+Shards are read back through ``mmap``, so a warm run keeps only the key
+index in RAM (~120 MB per million vectors) instead of every vector. Once
+``compact_every`` shards accumulate they are streamed into a single shard so
+the directory does not grow without bound. A legacy single-pickle store is
+migrated into the shard layout on first load.
+
+Vectors are stored as float32 (the pipeline dtype); writes are atomic
+(temp file + ``os.replace``).
 """
 
 from __future__ import annotations
 
 import atexit
 import hashlib
+import json
 import os
 import pickle
 import time
@@ -40,72 +54,229 @@ def _cache_key(kind: str, text: str) -> str:
 
 
 class EmbeddingStore:
-    """Dict-on-disk vector store with lazy load and batched atomic flushes."""
+    """Append-only shard store with lazy mmap load and atomic flushes."""
 
-    def __init__(self, path: Path | str, *, flush_every: int = 4096):
-        self._path = Path(path)
+    def __init__(
+        self,
+        path: Path | str,
+        *,
+        flush_every: int = 4096,
+        compact_every: int = 32,
+    ):
+        # ``path`` names the legacy pickle; the shard directory sits beside it
+        # under the same stem so existing call sites need no change.
+        self._legacy_path = Path(path)
+        self._dir = self._legacy_path.with_suffix("")
         self._flush_every = flush_every
-        self._entries: dict[str, np.ndarray] | None = None
-        self._dirty = 0
+        self._compact_every = compact_every
+        # key -> (shard index, row); vectors stay on disk behind mmap.
+        self._index: dict[str, tuple[int, int]] | None = None
+        self._shards: list[np.ndarray] = []
+        self._pending: dict[str, np.ndarray] = {}
+        self._seq = 0
         self.hits = 0
         self.misses = 0
         # Backstop for hard failures mid-run; normal exits flush explicitly.
         atexit.register(self.flush)
 
-    def _load(self) -> dict[str, np.ndarray]:
-        if self._entries is None:
+    # -- layout helpers ----------------------------------------------------
+
+    def _shard_stems(self) -> list[Path]:
+        """Shard stems with both parts present, in creation order."""
+        if not self._dir.exists():
+            return []
+        # Oldest first: within a run the index is filled in flush order, so
+        # replaying shards by age keeps the same last-writer-wins semantics.
+        # (Keys are content hashes, so duplicates hold equivalent vectors —
+        # order affects which copy is read, never what it means.)
+        found = sorted(self._dir.glob("shard-*.json"), key=lambda p: (p.stat().st_mtime, p.name))
+        stems = [p.with_suffix("") for p in found]
+        return [stem for stem in stems if stem.with_suffix(".npy").exists()]
+
+    def _commit_shard(self, stem: Path, keys: list[str]) -> Path:
+        """Publish a staged ``.npy.tmp``; the .json lands last as the marker."""
+        os.replace(stem.with_suffix(".npy.tmp"), stem.with_suffix(".npy"))
+        json_tmp = stem.with_suffix(".json.tmp")
+        json_tmp.write_text(json.dumps(keys), encoding="utf-8")
+        os.replace(json_tmp, stem.with_suffix(".json"))
+        return stem
+
+    def _write_shard(self, keys: list[str], vectors: np.ndarray, name: str) -> Path:
+        """Write one shard atomically from an in-memory matrix."""
+        self._dir.mkdir(parents=True, exist_ok=True)
+        stem = self._dir / name
+        # Save through a handle: np.save would append another .npy to a path
+        # whose suffix is not exactly that.
+        with open(stem.with_suffix(".npy.tmp"), "wb") as f:
+            np.save(f, vectors, allow_pickle=False)
+        return self._commit_shard(stem, keys)
+
+    def _attach_shard(self, stem: Path) -> None:
+        """Register an on-disk shard into the in-memory key index."""
+        keys = json.loads(stem.with_suffix(".json").read_text(encoding="utf-8"))
+        vectors = np.load(stem.with_suffix(".npy"), mmap_mode="r", allow_pickle=False)
+        shard_idx = len(self._shards)
+        self._shards.append(vectors)
+        if self._index is None:
+            self._index = {}
+        for row, key in enumerate(keys):
+            self._index[key] = (shard_idx, row)
+
+    # -- load / migrate ----------------------------------------------------
+
+    def _migrate_legacy(self) -> None:
+        """Fold a single-pickle store into the shard layout, once."""
+        try:
+            with open(self._legacy_path, "rb") as f:
+                entries = pickle.load(f)
+        except Exception as exc:
+            warnings.warn(
+                f"Embedding cache {self._legacy_path} is unreadable ({exc!r}); rebuilding.",
+                stacklevel=3,
+            )
+            self._legacy_path.unlink(missing_ok=True)
+            return
+        if not isinstance(entries, dict):
+            warnings.warn(
+                f"Embedding cache {self._legacy_path} is unreadable "
+                f"(expected a dict, got {type(entries).__name__}); rebuilding.",
+                stacklevel=3,
+            )
+            self._legacy_path.unlink(missing_ok=True)
+            return
+
+        started = time.time()
+        keys = list(entries)
+        if keys:
+            # Stream row by row into a memmap, dropping each source vector as
+            # it lands: stacking first would hold two copies of a
+            # multi-gigabyte store in RAM at once.
+            self._dir.mkdir(parents=True, exist_ok=True)
+            stem = self._dir / "shard-migrated-0000"
+            width = len(np.asarray(entries[keys[0]]))
+            merged = np.lib.format.open_memmap(
+                stem.with_suffix(".npy.tmp"),
+                mode="w+",
+                dtype=np.float32,
+                shape=(len(keys), width),
+            )
+            for row, key in enumerate(keys):
+                merged[row] = np.asarray(entries.pop(key), dtype=np.float32)
+            merged.flush()
+            del merged
+            self._commit_shard(stem, keys)
+        del entries
+        # The shard is a complete copy; keeping the pickle would double a
+        # multi-gigabyte store on disk for no benefit.
+        self._legacy_path.unlink(missing_ok=True)
+        print(
+            f"[embedding-cache] migrated {len(keys)} vectors from "
+            f"{self._legacy_path.name} into shards in {time.time() - started:.1f}s",
+            flush=True,
+        )
+
+    def _load(self) -> dict[str, tuple[int, int]]:
+        if self._index is None:
             started = time.time()
-            if self._path.exists():
-                try:
-                    with open(self._path, "rb") as f:
-                        self._entries = pickle.load(f)
-                except Exception as exc:
-                    warnings.warn(
-                        f"Embedding cache {self._path} is unreadable ({exc!r}); rebuilding.",
-                        stacklevel=2,
-                    )
-                    self._entries = {}
-            else:
-                self._entries = {}
+            if self._legacy_path.exists():
+                self._migrate_legacy()
+            self._index = {}
+            self._shards = []
+            for stem in self._shard_stems():
+                self._attach_shard(stem)
             print(
-                f"[embedding-cache] loaded {len(self._entries)} vectors "
-                f"from {self._path} in {time.time() - started:.1f}s",
+                f"[embedding-cache] loaded {len(self._index)} vectors from "
+                f"{len(self._shards)} shard(s) in {self._dir} "
+                f"in {time.time() - started:.1f}s",
                 flush=True,
             )
-        return self._entries
+        return self._index
+
+    # -- public API --------------------------------------------------------
 
     def __len__(self) -> int:
-        return len(self._load())
+        return len(self._load()) + len(self._pending)
 
     def get(self, key: str) -> np.ndarray | None:
-        vector = self._load().get(key)
-        if vector is None:
-            self.misses += 1
-        else:
+        index = self._load()
+        pending = self._pending.get(key)
+        if pending is not None:
             self.hits += 1
-        return vector
+            return pending
+        location = index.get(key)
+        if location is None:
+            self.misses += 1
+            return None
+        self.hits += 1
+        shard_idx, row = location
+        return np.asarray(self._shards[shard_idx][row])
 
     def put(self, key: str, vector: Any) -> None:
-        self._load()[key] = np.asarray(vector, dtype=np.float32)
-        self._dirty += 1
-        if self._dirty >= self._flush_every:
+        self._load()
+        self._pending[key] = np.asarray(vector, dtype=np.float32)
+        if len(self._pending) >= self._flush_every:
             self.flush()
 
     def flush(self) -> None:
-        if not self._dirty or self._entries is None:
+        if not self._pending:
             return
         started = time.time()
-        dirty = self._dirty
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self._path.with_name(f"{self._path.name}.{os.getpid()}.tmp")
-        with open(tmp_path, "wb") as f:
-            pickle.dump(self._entries, f, protocol=pickle.HIGHEST_PROTOCOL)
-        os.replace(tmp_path, self._path)
-        self._dirty = 0
+        keys = list(self._pending)
+        vectors = np.stack([self._pending[k] for k in keys])
+        self._seq += 1
+        stem = self._write_shard(keys, vectors, f"shard-{os.getpid()}-{self._seq:04d}")
+        self._pending = {}
+        self._attach_shard(stem)
         print(
-            f"[embedding-cache] flushed {dirty} new vectors "
-            f"({len(self._entries)} stored) to {self._path} "
+            f"[embedding-cache] appended {len(keys)} new vectors "
+            f"({len(self._index or {})} stored) to {stem.name} "
             f"in {time.time() - started:.1f}s",
+            flush=True,
+        )
+        if len(self._shards) >= self._compact_every:
+            self.compact()
+
+    def compact(self) -> None:
+        """Merge every shard into one, streaming rows to keep RAM flat."""
+        stems = self._shard_stems()
+        if len(stems) < 2:
+            return
+        started = time.time()
+        index = self._load()
+        # Deduplicate: a later shard wins, matching lookup order.
+        rows = [(key, shard_idx, row) for key, (shard_idx, row) in index.items()]
+        if not rows:
+            return
+        width = self._shards[rows[0][1]].shape[1]
+        self._dir.mkdir(parents=True, exist_ok=True)
+        target = self._dir / "shard-compact-0000"
+        npy_tmp = target.with_suffix(".npy.tmp")
+        merged = np.lib.format.open_memmap(
+            npy_tmp, mode="w+", dtype=np.float32, shape=(len(rows), width)
+        )
+        keys: list[str] = []
+        for new_row, (key, shard_idx, row) in enumerate(rows):
+            merged[new_row] = self._shards[shard_idx][row]
+            keys.append(key)
+        merged.flush()
+        del merged
+        # Drop mmap handles before replacing files underneath them (Windows
+        # refuses to unlink a mapped file).
+        self._shards = []
+        self._index = None
+        os.replace(npy_tmp, target.with_suffix(".npy"))
+        json_tmp = target.with_suffix(".json.tmp")
+        json_tmp.write_text(json.dumps(keys), encoding="utf-8")
+        os.replace(json_tmp, target.with_suffix(".json"))
+        for stem in stems:
+            if stem != target:
+                stem.with_suffix(".npy").unlink(missing_ok=True)
+                stem.with_suffix(".json").unlink(missing_ok=True)
+        self._index = {}
+        self._attach_shard(target)
+        print(
+            f"[embedding-cache] compacted {len(stems)} shards into "
+            f"{len(keys)} vectors in {time.time() - started:.1f}s",
             flush=True,
         )
 

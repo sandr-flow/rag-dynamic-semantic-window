@@ -307,10 +307,13 @@ def test_runner_second_run_hits_embedding_cache(temp_artifacts):
     )
 
     run(config, verbose=False)
-    store_files = list((temp_artifacts / "artifacts" / "embedding_cache").glob("*.pkl"))
-    assert len(store_files) == 1
+    store_dirs = [
+        p for p in (temp_artifacts / "artifacts" / "embedding_cache").iterdir() if p.is_dir()
+    ]
+    assert len(store_dirs) == 1
+    assert list(store_dirs[0].glob("shard-*.npy"))
 
-    # Second run builds a fresh store over the same file: everything must hit.
+    # Second run builds a fresh store over the same shards: everything must hit.
     run(config, verbose=False)
     stats = Settings.embed_model.cache_stats
     assert stats["misses"] == 0
