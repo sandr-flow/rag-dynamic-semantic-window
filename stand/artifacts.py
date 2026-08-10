@@ -153,7 +153,14 @@ def load_eval_questions(name: str, limit: int | None = None) -> list[dict[str, A
         return pairs[:limit] if limit else pairs
 
     items = load_dataset_items(name, limit=limit)
-    return [qa for item in items for qa in item.get("qa_pairs", [])]
+    # Tag each question with the document that answers it, in the same
+    # ``source_docs`` form extrahard pairs use, so the runner can drop
+    # questions whose document never makes it into the index.
+    return [
+        {**qa, "source_docs": [str(item.get("id", item_idx))]}
+        for item_idx, item in enumerate(items)
+        for qa in item.get("qa_pairs", [])
+    ]
 
 
 def save_extrahard_dataset(

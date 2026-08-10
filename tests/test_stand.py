@@ -278,6 +278,75 @@ def test_runner_end_to_end_mock(temp_artifacts, index_mode):
     assert {row["metric"] for row in rows} == {"hr@3", "mrr"}
 
 
+def test_drop_questions_without_documents():
+    from stand.runner import _drop_questions_without_documents
+
+    corpus_items = [{"id": 0, "title": "kept"}, {"id": 2, "title": "also kept"}]
+    questions = [
+        {"question": "answered by an indexed doc", "source_docs": ["0"]},
+        {"question": "answered by a dropped doc", "source_docs": ["1"]},
+        {"question": "compound, one source dropped", "source_docs": ["2", "1"]},
+        {"question": "compound, both indexed", "source_docs": ["0", "2"]},
+        {"question": "provenance unknown"},
+    ]
+
+    kept = _drop_questions_without_documents(questions, corpus_items, verbose=False)
+
+    assert [q["question"] for q in kept] == [
+        "answered by an indexed doc",
+        "compound, both indexed",
+        # No source_docs means we cannot prove it is unanswerable; keep it.
+        "provenance unknown",
+    ]
+
+
+@pytest.mark.parametrize("index_mode", ["per_document", "shared"])
+def test_runner_skips_questions_of_unchunkable_documents(temp_artifacts, index_mode):
+    """An unchunkable document takes its questions out of the metrics with it."""
+    from stand.runner import run
+
+    items = [
+        {
+            "title": "Chunkable",
+            "text": (
+                "Quantum mechanics describes nature at small scales. "
+                "Superposition lets a system exist in multiple states. "
+                "Entanglement correlates distant particles. "
+                "Measurement collapses the wavefunction."
+            ),
+            "qa_pairs": [
+                {"question": "What is superposition?",
+                 "answer_sentence": "Superposition lets a system exist in multiple states."},
+            ],
+        },
+        {
+            # One giant tokenless blob: exactly what PDF table extraction
+            # produces, and what drop_unchunkable_items exists to remove.
+            "title": "Unchunkable",
+            "text": "filler " * 4000,
+            "qa_pairs": [
+                {"question": "Unanswerable once the doc is dropped?",
+                 "answer_sentence": "filler filler filler"},
+            ],
+        },
+    ]
+    artifacts.save_dataset("mixed", items, source="custom", qa_model="custom")
+
+    result = run(
+        RunConfig(
+            dataset="mixed",
+            embedding="mock",
+            strategies=["naive"],
+            index_mode=index_mode,
+            top_k=3,
+        ),
+        verbose=False,
+    )
+
+    assert result["dataset"]["docs"] == 1
+    assert result["dataset"]["questions"] == 1
+
+
 def test_runner_second_run_hits_embedding_cache(temp_artifacts):
     from llama_index.core import Settings
 

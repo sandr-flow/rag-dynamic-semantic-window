@@ -83,8 +83,35 @@ def _document_from_item(item: dict[str, Any], index: int) -> Document:
     )
 
 
-    """Filter out documents whose nltk sentence split yields giant blobs."""
-    return drop_unchunkable_items(items, verbose=verbose)
+def _drop_questions_without_documents(
+    eval_questions: list[dict[str, Any]],
+    corpus_items: list[dict[str, Any]],
+    *,
+    verbose: bool = True,
+) -> list[dict[str, Any]]:
+    """Keep only questions whose every answer document is actually indexed.
+
+    Unchunkable documents are dropped from the corpus, but their questions
+    used to stay in the evaluation set. With no answer document in the index
+    such a question scores zero for every strategy, so the whole comparison
+    is shifted down by the share of dropped documents while looking like a
+    genuine retrieval failure. Questions of unknown provenance (no
+    ``source_docs``) are kept: silently dropping them would hide data, and
+    the previous behaviour is the safer default there.
+    """
+    indexed = {str(item.get("id", idx)) for idx, item in enumerate(corpus_items)}
+    kept = [
+        qa
+        for qa in eval_questions
+        if all(str(doc) in indexed for doc in qa.get("source_docs", []))
+    ]
+    if verbose and len(kept) < len(eval_questions):
+        dropped = len(eval_questions) - len(kept)
+        print(
+            f"  [INFO] dropped {dropped} question(s) whose answer document is "
+            f"not indexed, {len(kept)} remain"
+        )
+    return kept
 
 
 def _metrics_for_qa(
@@ -216,6 +243,15 @@ def run(config: RunConfig, *, verbose: bool = True) -> dict[str, Any]:
     eval_questions = artifacts.load_eval_questions(config.dataset, limit=config.limit)
     if not eval_questions:
         raise ValueError(f"Dataset '{config.dataset}' has no evaluation questions")
+
+    eval_questions = _drop_questions_without_documents(
+        eval_questions, corpus_items, verbose=verbose
+    )
+    if not eval_questions:
+        raise ValueError(
+            f"Dataset '{config.dataset}' has no questions whose answer document "
+            "survived corpus filtering"
+        )
 
     if verbose:
         print("=" * 64)
