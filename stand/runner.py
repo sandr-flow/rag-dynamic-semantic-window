@@ -37,23 +37,32 @@ from .embeddings import prepare_embed_model, report_cache
 from .runconfig import RunConfig
 
 
-def _resolve_tuned(config: RunConfig) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    """Return dynamic_semantic overrides and tuned manifest, if requested.
+def _resolve_strategy_overrides(
+    config: RunConfig,
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Per-strategy param overrides and tuned manifests.
 
-    Manual ``config.dynamic_overrides`` are applied on top of the
-    default/tuned params so ablations can pin individual knobs.
+    ``params=tuned`` loads a tuned artifact for each requested strategy when
+    one exists; missing artifacts keep library defaults. Manual
+    ``dynamic_overrides`` still stack on top of dynamic_semantic.
     """
-    params: dict[str, Any] = {}
-    tuned = None
+    overrides: dict[str, dict[str, Any]] = {}
+    manifests: dict[str, dict[str, Any]] = {}
+    strategy_ids = [normalize_strategy_id(s) for s in config.strategies]
+
     if config.params == "tuned":
         tuned_source = config.tuned_dataset or config.dataset
-        tuned = artifacts.load_tuned(tuned_source, config.embedding)
-        if tuned is None:
+        for strategy_id in strategy_ids:
+            tuned = artifacts.load_tuned(tuned_source, config.embedding, strategy=strategy_id)
+            if tuned is None:
+                continue
+            manifests[strategy_id] = tuned
+            overrides[strategy_id] = dict(tuned.get("params") or {})
+        if "dynamic_semantic" in strategy_ids and "dynamic_semantic" not in manifests:
             raise ValueError(
                 f"No tuned params for dataset '{tuned_source}' + embedding "
                 f"'{config.embedding}'. Run: python -m stand tune ..."
             )
-        params.update(tuned.get("params", {}))
 
     if config.dynamic_overrides:
         allowed = set(STRATEGY_OVERRIDE_KEYS["dynamic_semantic"])
@@ -63,9 +72,15 @@ def _resolve_tuned(config: RunConfig) -> tuple[dict[str, Any], dict[str, Any] | 
                 "Unsupported dynamic_overrides keys: "
                 f"{', '.join(unknown)}. Allowed: {', '.join(sorted(allowed))}"
             )
-        params.update(config.dynamic_overrides)
+        overrides.setdefault("dynamic_semantic", {}).update(config.dynamic_overrides)
 
-    return params, tuned
+    return overrides, manifests
+
+
+def _resolve_tuned(config: RunConfig) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Backward-compatible view: dynamic_semantic overrides + its manifest."""
+    overrides, manifests = _resolve_strategy_overrides(config)
+    return overrides.get("dynamic_semantic", {}), manifests.get("dynamic_semantic")
 
 
 def _document_from_item(item: dict[str, Any], index: int) -> Document:
@@ -130,7 +145,7 @@ def _build_strategies(
     strategy_ids: list[str],
     documents: list[Document],
     top_k: int,
-    dynamic_overrides: dict[str, Any],
+    strategy_overrides: dict[str, dict[str, Any]],
     failed: set[str],
     *,
     verbose: bool = False,
@@ -153,7 +168,7 @@ def _build_strategies(
                 f"     {log_prefix}index {normalized} ({i}/{len(strategy_ids)})...",
                 flush=True,
             )
-        overrides = dynamic_overrides if normalized == "dynamic_semantic" else {}
+        overrides = strategy_overrides.get(normalized, {})
         try:
             strategy = create_strategy(normalized, documents, top_k=top_k, overrides=overrides)
             strategies.append(strategy)
@@ -219,7 +234,8 @@ def run(config: RunConfig, *, verbose: bool = True) -> dict[str, Any]:
     """Benchmark one combination and persist the result. Returns the result dict."""
     strategy_ids = [normalize_strategy_id(s) for s in config.strategies]
     metric_k = config.effective_metric_k
-    dynamic_overrides, tuned_manifest = _resolve_tuned(config)
+    strategy_overrides, tuned_manifests = _resolve_strategy_overrides(config)
+    tuned_manifest = tuned_manifests.get("dynamic_semantic")
 
     embed_model, embedding_config = prepare_embed_model(config.embedding)
 
@@ -263,8 +279,13 @@ def run(config: RunConfig, *, verbose: bool = True) -> dict[str, Any]:
         print(f"Index mode: {config.index_mode}")
         print(f"Params:     {config.params}")
         print(f"Top-K: {config.top_k}, Metric-K: {metric_k}")
-        if dynamic_overrides:
-            print(f"Dynamic params (tuned/overrides): {dynamic_overrides}")
+        if strategy_overrides:
+            for sid, params in strategy_overrides.items():
+                source = "tuned" if sid in tuned_manifests else "overrides"
+                print(f"  {sid} ({source}): {params}")
+        defaulted = [sid for sid in strategy_ids if sid not in strategy_overrides]
+        if defaulted and config.params == "tuned":
+            print(f"  library defaults (no tuned artifact): {', '.join(defaulted)}")
         if tuned_manifest and tuned_manifest.get("metrics_val"):
             val = tuned_manifest["metrics_val"]
             tuned_from = config.tuned_dataset or config.dataset
@@ -298,7 +319,7 @@ def run(config: RunConfig, *, verbose: bool = True) -> dict[str, Any]:
             strategy_ids,
             documents,
             config.top_k,
-            dynamic_overrides,
+            strategy_overrides,
             failed,
             verbose=verbose,
             log_prefix=f"{shared_prefix} ",
@@ -333,7 +354,7 @@ def run(config: RunConfig, *, verbose: bool = True) -> dict[str, Any]:
                 strategy_ids,
                 documents,
                 config.top_k,
-                dynamic_overrides,
+                strategy_overrides,
                 failed,
                 verbose=verbose,
                 log_prefix=f"{doc_prefix} ",
@@ -379,7 +400,7 @@ def run(config: RunConfig, *, verbose: bool = True) -> dict[str, Any]:
         print(f"\nTotal: {time.time() - start:.1f}s")
 
     result = {
-        "config": _config_payload(config, embedding_config),
+        "config": _config_payload(config, embedding_config, strategy_overrides),
         "dataset": {"name": config.dataset, "docs": len(corpus_items), "questions": total_questions},
         "summary": summary,
         "aggregate": {name: [dict(m) for m in rows] for name, rows in aggregate.items()},
@@ -391,6 +412,18 @@ def run(config: RunConfig, *, verbose: bool = True) -> dict[str, Any]:
             "confidence": DEFAULT_CONFIDENCE,
             "seed": DEFAULT_SEED,
             "rows": [comparison.to_dict() for comparison in comparisons],
+        }
+    if tuned_manifests:
+        result["tuned_by_strategy"] = {
+            sid: {
+                "source_dataset": config.tuned_dataset or config.dataset,
+                "created_at": manifest.get("created_at"),
+                "params": manifest.get("params"),
+                "metrics_train": manifest.get("metrics_train"),
+                "metrics_val": manifest.get("metrics_val"),
+                "tuning": manifest.get("tuning"),
+            }
+            for sid, manifest in tuned_manifests.items()
         }
     if tuned_manifest:
         result["tuned"] = {
@@ -452,7 +485,11 @@ def _print_table(
         )
 
 
-def _config_payload(config: RunConfig, embedding_config) -> dict[str, Any]:
+def _config_payload(
+    config: RunConfig,
+    embedding_config,
+    strategy_overrides: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     payload = {
         "dataset": config.dataset,
         "embedding": config.embedding,
@@ -461,6 +498,9 @@ def _config_payload(config: RunConfig, embedding_config) -> dict[str, Any]:
         "strategies": [normalize_strategy_id(s) for s in config.strategies],
         "index_mode": config.index_mode,
         "params": config.params,
+        "strategy_overrides": {
+            sid: dict(params) for sid, params in (strategy_overrides or {}).items()
+        },
         "top_k": config.top_k,
         "metric_k": config.effective_metric_k,
     }

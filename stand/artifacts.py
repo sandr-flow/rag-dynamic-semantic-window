@@ -304,16 +304,21 @@ def register_embedding(info: EmbeddingInfo) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Tuned hyperparameters (per dataset + embedding — the per-domain hypothesis)
+# Tuned hyperparameters (per dataset + embedding + strategy)
 # ---------------------------------------------------------------------------
 
-
-def tuned_key(dataset: str, embedding: str) -> str:
-    return f"{slugify(dataset)}__{slugify(embedding)}"
+_DYNAMIC_STRATEGY = "dynamic_semantic"
 
 
-def tuned_dir(dataset: str, embedding: str) -> Path:
-    return paths.TUNED_DIR / tuned_key(dataset, embedding)
+def tuned_key(dataset: str, embedding: str, strategy: str = _DYNAMIC_STRATEGY) -> str:
+    base = f"{slugify(dataset)}__{slugify(embedding)}"
+    if strategy == _DYNAMIC_STRATEGY:
+        return base
+    return f"{base}__{slugify(strategy)}"
+
+
+def tuned_dir(dataset: str, embedding: str, strategy: str = _DYNAMIC_STRATEGY) -> Path:
+    return paths.TUNED_DIR / tuned_key(dataset, embedding, strategy)
 
 
 def save_tuned(
@@ -322,17 +327,19 @@ def save_tuned(
     params: dict[str, Any],
     metrics: dict[str, Any] | None = None,
     *,
+    strategy: str = _DYNAMIC_STRATEGY,
     metrics_train: dict[str, Any] | None = None,
     metrics_val: dict[str, Any] | None = None,
     tuning: dict[str, Any] | None = None,
 ) -> Path:
-    """Persist Optuna best params for a (dataset, embedding) domain."""
-    target = tuned_dir(dataset, embedding)
+    """Persist Optuna best params for a (dataset, embedding, strategy) domain."""
+    target = tuned_dir(dataset, embedding, strategy)
     target.mkdir(parents=True, exist_ok=True)
     resolved_metrics = metrics or metrics_val or metrics_train or {}
     payload = {
         "dataset": slugify(dataset),
         "embedding": slugify(embedding),
+        "strategy": slugify(strategy),
         "params": params,
         "metrics": resolved_metrics,
         "created_at": _now(),
@@ -348,14 +355,22 @@ def save_tuned(
     return target
 
 
-def load_tuned(dataset: str, embedding: str) -> dict[str, Any] | None:
-    """Return tuned dynamic_semantic params for a domain, or None."""
-    manifest_path = tuned_dir(dataset, embedding) / "manifest.json"
+def load_tuned(
+    dataset: str,
+    embedding: str,
+    strategy: str = _DYNAMIC_STRATEGY,
+) -> dict[str, Any] | None:
+    """Return tuned params for a domain, or None."""
+    manifest_path = tuned_dir(dataset, embedding, strategy) / "manifest.json"
     if not manifest_path.exists():
         return None
     with open(manifest_path, encoding="utf-8") as f:
         return json.load(f)
 
 
-def has_tuned(dataset: str, embedding: str) -> bool:
-    return (tuned_dir(dataset, embedding) / "manifest.json").exists()
+def has_tuned(
+    dataset: str,
+    embedding: str,
+    strategy: str = _DYNAMIC_STRATEGY,
+) -> bool:
+    return (tuned_dir(dataset, embedding, strategy) / "manifest.json").exists()

@@ -106,20 +106,32 @@ def _cmd_prepare_embedding(args: argparse.Namespace) -> int:
 
 
 def _cmd_tune(args: argparse.Namespace) -> int:
+    from src.strategy_registry import ALL_STRATEGY_IDS, parse_strategy_ids
+
     from .tune import tune
 
-    tune(
-        args.dataset,
-        args.embedding,
-        n_trials=args.n_trials,
-        soft_token_limit=args.soft_token_limit,
-        rebuild_corpus=args.rebuild_corpus,
-        phantom_window=args.phantom_window,
-        train_ratio=args.train_ratio,
-        split_seed=args.split_seed,
-        hpo_config=args.hpo_config,
-        index_mode=args.index_mode,
-    )
+    raw = (args.strategy or "dynamic_semantic").strip()
+    if raw.lower() == "all":
+        strategy_ids = list(ALL_STRATEGY_IDS)
+    else:
+        strategy_ids = parse_strategy_ids(raw)
+
+    for strategy_id in strategy_ids:
+        print(f"\n>>> Tuning {strategy_id}")
+        tune(
+            args.dataset,
+            args.embedding,
+            strategy=strategy_id,
+            n_trials=args.n_trials,
+            soft_token_limit=args.soft_token_limit,
+            rebuild_corpus=args.rebuild_corpus,
+            phantom_window=args.phantom_window,
+            train_ratio=args.train_ratio,
+            split_seed=args.split_seed,
+            hpo_config=args.hpo_config,
+            index_mode=args.index_mode,
+            top_k=args.top_k,
+        )
     return 0
 
 
@@ -237,10 +249,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_emb.add_argument("--base-url", default=None)
     p_emb.add_argument("--no-warm", action="store_true", help="Register without downloading weights.")
 
-    p_tune = sub.add_parser("tune", help="Per-domain Optuna tuning of dynamic_semantic.")
+    p_tune = sub.add_parser(
+        "tune",
+        help="Per-domain Optuna tuning of a retrieval strategy.",
+    )
     p_tune.add_argument("--dataset", required=True)
     p_tune.add_argument("--embedding", required=True)
+    p_tune.add_argument(
+        "--strategy",
+        default="dynamic_semantic",
+        help="Strategy id, comma-separated ids, or 'all'. "
+        "dynamic_semantic uses the cached corpus; other strategies rebuild "
+        "the index each trial (live path).",
+    )
     p_tune.add_argument("--n-trials", type=int, default=100)
+    p_tune.add_argument("--top-k", type=int, default=5)
     p_tune.add_argument("--soft-token-limit", type=int, default=1200)
     p_tune.add_argument("--rebuild-corpus", action="store_true")
     p_tune.add_argument("--phantom-window", type=int, default=1)

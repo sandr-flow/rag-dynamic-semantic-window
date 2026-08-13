@@ -32,6 +32,36 @@ from src.dynamic_retriever import DynamicSemanticExpander
 from src.utils import build_embedding_texts, create_sentence_nodes, split_into_sentences
 
 
+def _interleave_node_lists(
+    primary: list[NodeWithScore], secondary: list[NodeWithScore]
+) -> list[NodeWithScore]:
+    """Rank-interleave two seed lists, keeping the first copy of each node id.
+
+    A duplicate is skipped and the next unused node from that same list fills
+    the slot, matching :func:`src.seed_retrieval.interleave_ranked_indices`.
+    """
+    seen: set[str] = set()
+    merged: list[NodeWithScore] = []
+    buckets = (primary, secondary)
+    pointers = [0, 0]
+    while True:
+        progressed = False
+        for i, bucket in enumerate(buckets):
+            while pointers[i] < len(bucket):
+                item = bucket[pointers[i]]
+                pointers[i] += 1
+                node_id = item.node.node_id
+                if node_id in seen:
+                    continue
+                seen.add(node_id)
+                merged.append(item)
+                progressed = True
+                break
+        if not progressed:
+            break
+    return merged
+
+
 def _safe_doc_id(raw_doc_id: object, fallback: str, used: set[str]) -> str:
     """Return a stable node-id-safe document id."""
     value = str(raw_doc_id or fallback)
@@ -64,6 +94,8 @@ class BaseStrategy(ABC):
         self.index: VectorStoreIndex | None = None
         self._matrix: np.ndarray | None = None
         self._matrix_node_ids: list[str] | None = None
+        self._clean_matrix: np.ndarray | None = None
+        self._clean_node_ids: list[str] | None = None
         self._build_index()
 
     def _ensure_matrix(self) -> None:
@@ -81,30 +113,48 @@ class BaseStrategy(ABC):
         matrix = np.asarray(
             [data.embedding_dict[nid] for nid in node_ids], dtype=np.float32
         )
-        norms = np.linalg.norm(matrix, axis=1, keepdims=True)
-        norms[norms == 0] = 1.0
-        self._matrix = matrix / norms
+        self._matrix = self._normalize_rows(matrix)
         self._matrix_node_ids = node_ids
 
-    def _fast_retrieve(self, query: str, top_k: int) -> list[NodeWithScore]:
-        """Cosine top-k over the precomputed matrix (SimpleVectorStore parity)."""
-        self._ensure_matrix()
+    @staticmethod
+    def _normalize_rows(matrix: np.ndarray) -> np.ndarray:
+        norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        return matrix / norms
+
+    def _normalize_query(self, query: str) -> np.ndarray:
         q = np.asarray(Settings.embed_model.get_query_embedding(query), dtype=np.float32)
         q_norm = np.linalg.norm(q)
         if q_norm:
             q = q / q_norm
-        scores = self._matrix @ q
+        return q
+
+    def _topk_from_matrix(
+        self,
+        matrix: np.ndarray,
+        node_ids: list[str],
+        query_vec: np.ndarray,
+        top_k: int,
+    ) -> list[NodeWithScore]:
+        scores = matrix @ query_vec
         k = min(top_k, len(scores))
         top = np.argpartition(scores, -k)[-k:]
         top = top[np.argsort(scores[top])[::-1]]
         docstore = self.index.docstore
         return [
             NodeWithScore(
-                node=docstore.get_node(self._matrix_node_ids[i]),
+                node=docstore.get_node(node_ids[i]),
                 score=float(scores[i]),
             )
             for i in top
         ]
+
+    def _fast_retrieve(self, query: str, top_k: int) -> list[NodeWithScore]:
+        """Cosine top-k over the precomputed matrix (SimpleVectorStore parity)."""
+        self._ensure_matrix()
+        return self._topk_from_matrix(
+            self._matrix, self._matrix_node_ids, self._normalize_query(query), top_k
+        )
 
     @abstractmethod
     def _build_index(self) -> None:
@@ -336,6 +386,11 @@ class DynamicSemanticStrategy(BaseStrategy):
         # VectorStoreIndex strips embeddings from the nodes it stores, so the
         # docstore cannot serve as an embedding source afterwards.
         embeddings_matrix = np.array([node.embedding for node in nodes], dtype=np.float32)
+        if adjacency_matrix is not None:
+            self._clean_matrix = self._normalize_rows(
+                np.asarray(adjacency_matrix, dtype=np.float32)
+            )
+            self._clean_node_ids = [node.node_id for node in nodes]
         self.expander = DynamicSemanticExpander(
             sentences=[node.text for node in nodes],
             node_ids=[node.node_id for node in nodes],
@@ -359,11 +414,26 @@ class DynamicSemanticStrategy(BaseStrategy):
         Retrieve with dynamic semantic expansion using two-pass approach.
 
         First pass: Fetch top_k * prefetch_multiplier seeds for broad coverage.
+        When dual-seed is on, the same budget is also taken from clean sentence
+        embeddings (Fixed Window matching) and the two lists are interleaved.
         Second pass: Expand and deduplicate to target top_k results.
         """
-        # Two-pass: first pass fetches more seeds for better coverage
         prefetch_k = self.top_k * self.prefetch_multiplier
-        nodes = self._fast_retrieve(query, prefetch_k)
+        self._ensure_matrix()
+        query_vec = self._normalize_query(query)
+        phantom_nodes = self._topk_from_matrix(
+            self._matrix, self._matrix_node_ids, query_vec, prefetch_k
+        )
+        nodes = phantom_nodes
+        if (
+            self.dynamic_config.dual_seed
+            and self._clean_matrix is not None
+            and self._clean_node_ids is not None
+        ):
+            clean_nodes = self._topk_from_matrix(
+                self._clean_matrix, self._clean_node_ids, query_vec, prefetch_k
+            )
+            nodes = _interleave_node_lists(phantom_nodes, clean_nodes)
 
         return self.expander.postprocess_nodes(nodes, QueryBundle(query_str=query))
 

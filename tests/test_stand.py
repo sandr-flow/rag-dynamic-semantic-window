@@ -106,8 +106,29 @@ def test_tuned_roundtrip(temp_artifacts):
     assert artifacts.has_tuned("ds", "mock")
     tuned = artifacts.load_tuned("ds", "mock")
     assert tuned["params"]["threshold"] == 0.9
+    assert tuned["strategy"] == "dynamic_semantic"
     assert tuned["metrics_train"]["hit_rate"] == 0.9
     assert tuned["metrics_val"]["hit_rate"] == 0.8
+
+
+def test_tuned_roundtrip_per_strategy(temp_artifacts):
+    artifacts.save_tuned(
+        "ds",
+        "mock",
+        {"chunk_size": 192, "chunk_overlap": 16},
+        {"hit_rate": 0.7},
+        strategy="naive",
+    )
+    artifacts.save_tuned(
+        "ds",
+        "mock",
+        {"window_size": 2},
+        {"hit_rate": 0.75},
+        strategy="fixed_window",
+    )
+    assert artifacts.load_tuned("ds", "mock", strategy="naive")["params"]["chunk_size"] == 192
+    assert artifacts.load_tuned("ds", "mock", strategy="fixed_window")["params"]["window_size"] == 2
+    assert artifacts.load_tuned("ds", "mock") is None
 
 
 def test_tune_corpus_uses_phantom_embedding_texts():
@@ -148,7 +169,7 @@ def test_tune_corpus_uses_phantom_embedding_texts():
         phantom_window=1,
     )
 
-    assert corpus.embedding_mode == "phantom_w1__adj_clean"
+    assert corpus.embedding_mode == "phantom_w1__adj_clean__dual_seed"
     assert corpus.phantom_window == 1
     assert embed_model.texts[0] == f"{sentences[0]} {sentences[1]}"
     assert embed_model.texts[5] == f"{sentences[4]} {sentences[5]} {sentences[6]}"
@@ -193,7 +214,7 @@ def test_tune_corpus_clean_adjacency_uses_second_batch():
     # Three batches: phantom texts, clean sentences, questions.
     assert len(embed_model.batches) == 3
     assert embed_model.batches[1] == sentences
-    assert corpus.embedding_mode == "phantom_w1__adj_clean"
+    assert corpus.embedding_mode == "phantom_w1__adj_clean__dual_seed"
     assert corpus.adjacency_space == "clean"
 
     clean_matrix = np.array(
@@ -207,6 +228,68 @@ def test_tune_corpus_clean_adjacency_uses_second_batch():
         [[float(len(t)), 1.0, 0.0] for t in embed_model.batches[0]], dtype=np.float32
     )
     np.testing.assert_allclose(corpus.articles[0].embeddings, phantom_matrix, rtol=1e-6)
+    np.testing.assert_allclose(corpus.articles[0].clean_embeddings, clean_matrix, rtol=1e-6)
+    # Dual-seed candidate list is the union of top-k from each space (≤ 2k).
+    k = len(corpus.questions[0].top_k_indices)
+    assert k >= 1
+    assert k <= 2 * corpus.top_k
+
+
+def test_seed_indices_union_clean_and_phantom():
+    from stand.tune import _seed_indices
+
+    phantom = np.array([[1.0, 0.0], [0.0, 1.0], [0.1, 0.1]], dtype=np.float32)
+    clean = np.array([[0.0, 1.0], [1.0, 0.0], [0.1, 0.1]], dtype=np.float32)
+    query = np.array([1.0, 0.0], dtype=np.float32)
+    sims, idx = _seed_indices(query, phantom, clean, k=1)
+    assert sims.argmax() == 0
+    assert list(idx) == [0, 1]
+
+
+def test_dual_seed_retrieve_interleaves_clean_hits():
+    from llama_index.core import Document, Settings
+    from llama_index.core.embeddings import MockEmbedding
+
+    from src.config import DynamicSemanticConfig
+    from src.strategies import DynamicSemanticStrategy, _interleave_node_lists
+
+    old = getattr(Settings, "_embed_model", None)
+    Settings.embed_model = MockEmbedding(embed_dim=4)
+    try:
+        text = " ".join(
+            f"Sentence number {i} talks about one shared topic here." for i in range(8)
+        )
+        strategy = DynamicSemanticStrategy(
+            [Document(text=text)],
+            top_k=2,
+            dynamic_config=DynamicSemanticConfig(
+                phantom_window=1, prefetch_multiplier=1, dual_seed=True
+            ),
+        )
+        node_ids = list(strategy._clean_node_ids)
+        n = len(node_ids)
+        phantom = np.zeros((n, 4), dtype=np.float32)
+        phantom[:, 0] = np.arange(1, n + 1, dtype=np.float32)
+        phantom[:, 1] = 1.0
+        clean = np.zeros((n, 4), dtype=np.float32)
+        clean[:, 0] = np.arange(n, 0, -1, dtype=np.float32)
+        clean[:, 1] = 1.0
+        strategy._matrix = strategy._normalize_rows(phantom)
+        strategy._matrix_node_ids = node_ids
+        strategy._clean_matrix = strategy._normalize_rows(clean)
+        query_vec = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        phantom_nodes = strategy._topk_from_matrix(
+            strategy._matrix, strategy._matrix_node_ids, query_vec, 2
+        )
+        clean_nodes = strategy._topk_from_matrix(
+            strategy._clean_matrix, strategy._clean_node_ids, query_vec, 2
+        )
+        merged = _interleave_node_lists(phantom_nodes, clean_nodes)
+    finally:
+        Settings._embed_model = old
+
+    assert merged[0].node.node_id == node_ids[-1]
+    assert merged[1].node.node_id == node_ids[0]
 
 
 def test_corpus_document_split_keeps_article_boundaries():
@@ -535,3 +618,100 @@ def test_document_metadata_is_excluded_from_embed_content():
     assert "source_doc" not in embed_content
     assert "Some Long Article Title" not in embed_content
     assert nodes[0].metadata["source_doc"] == "3"
+
+
+def _three_doc_items():
+    return [
+        {
+            "id": i,
+            "title": f"Doc {i}",
+            "text": (
+                f"Topic {i} opens with a clear statement of the claim. "
+                f"Supporting evidence for topic {i} follows in the next sentence. "
+                f"A third sentence adds background about topic {i}. "
+                f"The closing sentence restates the answer about topic {i}."
+            ),
+            "qa_pairs": [
+                {
+                    "question": f"What is the claim in topic {i}?",
+                    "answer_sentence": f"Topic {i} opens with a clear statement of the claim.",
+                }
+            ],
+        }
+        for i in range(3)
+    ]
+
+
+def test_split_items_keeps_compound_questions_inside_one_split():
+    from stand.tune_live import split_items_by_documents
+
+    items = [{"id": "a", "text": "A."}, {"id": "b", "text": "B."}, {"id": "c", "text": "C."}]
+    questions = [
+        {"question": "a only", "source_docs": ["a"]},
+        {"question": "b+c", "source_docs": ["b", "c"]},
+        {"question": "a+c", "source_docs": ["a", "c"]},
+    ]
+    train_items, train_q, val_items, val_q = split_items_by_documents(
+        items, questions, train_ratio=0.67, seed=0
+    )
+    train_ids = {str(item["id"]) for item in train_items}
+    val_ids = {str(item["id"]) for item in val_items}
+    assert train_ids.isdisjoint(val_ids)
+    for q in train_q:
+        assert all(doc in train_ids for doc in q["source_docs"])
+    for q in val_q:
+        assert all(doc in val_ids for doc in q["source_docs"])
+
+
+def test_runner_applies_per_strategy_tuned_params(temp_artifacts):
+    from stand.runner import run
+
+    artifacts.save_dataset("mini_tuned", _three_doc_items(), source="custom", qa_model="custom")
+    artifacts.save_tuned(
+        "mini_tuned",
+        "mock",
+        {"chunk_size": 128, "chunk_overlap": 0},
+        {"hit_rate": 0.5},
+        strategy="naive",
+    )
+    artifacts.save_tuned(
+        "mini_tuned",
+        "mock",
+        {"threshold": 0.5, "min_window": 0, "max_expand": 1},
+        {"hit_rate": 0.5},
+        strategy="dynamic_semantic",
+    )
+
+    result = run(
+        RunConfig(
+            dataset="mini_tuned",
+            embedding="mock",
+            strategies=["naive", "dynamic_semantic"],
+            params="tuned",
+            top_k=3,
+        ),
+        verbose=False,
+    )
+    assert result["config"]["strategy_overrides"]["naive"]["chunk_size"] == 128
+    assert result["config"]["strategy_overrides"]["dynamic_semantic"]["threshold"] == 0.5
+    assert set(result["tuned_by_strategy"]) == {"naive", "dynamic_semantic"}
+
+
+def test_tune_live_naive_mock(temp_artifacts):
+    from stand.tune import tune
+
+    artifacts.save_dataset("tune_mini", _three_doc_items(), source="custom", qa_model="custom")
+    out = tune(
+        "tune_mini",
+        "mock",
+        strategy="naive",
+        n_trials=2,
+        index_mode="shared",
+        soft_token_limit=5000,
+        split_seed=42,
+    )
+    assert out["strategy"] == "naive"
+    assert "chunk_size" in out["params"]
+    assert artifacts.has_tuned("tune_mini", "mock", strategy="naive")
+    loaded = artifacts.load_tuned("tune_mini", "mock", strategy="naive")
+    assert loaded["tuning"]["path"] == "live"

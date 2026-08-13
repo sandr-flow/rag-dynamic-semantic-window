@@ -29,11 +29,18 @@ except ImportError:
 
 from src.config import DEFAULT_CORPUS_CONFIG, DEFAULT_EXPANSION_CONFIG, DEFAULT_OPTUNA_CONFIG
 from src.corpus_data import CorpusData, global_answer_indices, is_shared_corpus, question_is_valid
-from src.expansion_core import DynamicExpansionCore, build_garbage_mask, evaluate_multi_retrieval, evaluate_retrieval
+from src.expansion_core import (
+    DynamicExpansionCore,
+    build_garbage_mask,
+    build_header_mask,
+    evaluate_multi_retrieval,
+    evaluate_retrieval,
+)
 from src.hpo_config import (
     HPOSettings,
     compute_objective_score,
     load_hpo_settings,
+    quantize_params,
     suggest_params,
 )
 
@@ -158,7 +165,15 @@ def _evaluation_context(corpus: CorpusData):
         )
         for a in corpus.articles
     }
-    return article_lookup, garbage_masks
+    header_masks = {
+        a.article_id: build_header_mask(a.sentences) for a in corpus.articles
+    }
+    global_header_mask = (
+        build_header_mask(corpus.global_sentences)
+        if is_shared_corpus(corpus) and corpus.global_sentences
+        else None
+    )
+    return article_lookup, garbage_masks, header_masks, global_header_mask
 
 
 def _evaluate_question(
@@ -169,6 +184,8 @@ def _evaluate_question(
     target_clusters: int,
     article_lookup: dict[int, Any],
     garbage_masks: dict[int, np.ndarray],
+    header_masks: dict[int, np.ndarray],
+    global_header_mask: np.ndarray | None,
 ) -> dict[str, Any]:
     resolved = _resolved_expansion_params(params)
 
@@ -185,6 +202,7 @@ def _evaluate_question(
             merge_gap=resolved["merge_gap"],
             target_clusters=target_clusters,
             garbage_mask=corpus.global_garbage_mask,
+            header_mask=global_header_mask,
             segment_ids=corpus.global_segment_ids,
         )
         clusters = expander.expand_and_retrieve()
@@ -210,6 +228,7 @@ def _evaluate_question(
         merge_gap=resolved["merge_gap"],
         target_clusters=target_clusters,
         garbage_mask=garbage_masks.get(question.article_id),
+        header_mask=header_masks.get(question.article_id),
     )
     clusters = expander.expand_and_retrieve()
     metrics = evaluate_retrieval(
@@ -229,10 +248,14 @@ def evaluate_params(
     hpo_settings: HPOSettings | None = None,
     article_lookup: dict[int, Any] | None = None,
     garbage_masks: dict[int, np.ndarray] | None = None,
+    header_masks: dict[int, np.ndarray] | None = None,
+    global_header_mask: np.ndarray | None = None,
 ) -> dict[str, Any]:
     """Evaluate one hyperparameter set against a cached corpus."""
-    if article_lookup is None or garbage_masks is None:
-        article_lookup, garbage_masks = _evaluation_context(corpus)
+    if article_lookup is None or garbage_masks is None or header_masks is None:
+        article_lookup, garbage_masks, header_masks, global_header_mask = (
+            _evaluation_context(corpus)
+        )
 
     hpo_settings = hpo_settings or load_hpo_settings()
     objective_policy = hpo_settings.objective
@@ -250,6 +273,8 @@ def evaluate_params(
             target_clusters=target_clusters,
             article_lookup=article_lookup,
             garbage_masks=garbage_masks,
+            header_masks=header_masks,
+            global_header_mask=global_header_mask,
         )
 
         if question_is_valid(question, corpus):
@@ -312,9 +337,11 @@ def create_objective(
     Returns:
         Objective function for Optuna.
     """
-    # Build article lookup; garbage masks depend only on sentence texts, so
-    # they are precomputed once and shared across trials.
-    article_lookup, garbage_masks = _evaluation_context(corpus)
+    # Build article lookup; garbage/header masks depend only on sentence texts,
+    # so they are precomputed once and shared across trials.
+    article_lookup, garbage_masks, header_masks, global_header_mask = (
+        _evaluation_context(corpus)
+    )
     hpo_settings = hpo_settings or load_hpo_settings()
     
     def objective(trial: optuna.Trial) -> float:
@@ -327,6 +354,8 @@ def create_objective(
             hpo_settings=hpo_settings,
             article_lookup=article_lookup,
             garbage_masks=garbage_masks,
+            header_masks=header_masks,
+            global_header_mask=global_header_mask,
         )
         
         # Log intermediate values for analysis
@@ -415,6 +444,7 @@ def run_optuna() -> int:
     print("=" * 60)
     
     best = study.best_trial
+    best_params = quantize_params(dict(best.params), hpo_settings.search_space)
     tokens_ok = best.user_attrs.get('tokens_ok', False)
     print(f"\nBest trial #{best.number}:")
     print(f"   Score: {best.value:.4f}")
@@ -423,9 +453,9 @@ def run_optuna() -> int:
     print(f"   Avg Tokens: {best.user_attrs.get('avg_tokens', 0):.1f} (limit: {hpo_settings.objective.soft_token_limit}) {'[OK]' if tokens_ok else '[WARN]'}")
     
     print("\nBest hyperparameters:")
-    for key, value in best.params.items():
+    for key, value in best_params.items():
         if isinstance(value, float):
-            print(f"   {key}: {value:.4f}")
+            print(f"   {key}: {value:.2f}")
         else:
             print(f"   {key}: {value}")
     
@@ -444,7 +474,7 @@ def run_optuna() -> int:
         f.write(f"# MRR: {best.user_attrs.get('mrr', 0):.4f}\n")
         f.write(f"# Avg Tokens: {best.user_attrs.get('avg_tokens', 0):.1f}\n")
         f.write(f"# Tokens OK: {best.user_attrs.get('tokens_ok', False)}\n\n")
-        for key, value in best.params.items():
+        for key, value in best_params.items():
             f.write(f"{key} = {value}\n")
     
     print(f"\n[INFO] Best params saved to: {params_path}")
@@ -477,7 +507,7 @@ def run_optuna() -> int:
                     "articles": len(corpus.articles),
                     "questions": len(corpus.questions),
                 },
-                "params": best.params,
+                "params": best_params,
             },
             f,
             indent=2,
@@ -513,9 +543,9 @@ def run_optuna() -> int:
     print("```python")
     print("@dataclass")
     print("class ExpansionConfig:")
-    for key, value in best.params.items():
+    for key, value in best_params.items():
         if isinstance(value, float):
-            print(f"    {key}: float = {value:.4f}")
+            print(f"    {key}: float = {value:.2f}")
         else:
             print(f"    {key}: int = {value}")
     print("```")

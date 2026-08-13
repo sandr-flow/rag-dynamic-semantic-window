@@ -8,7 +8,12 @@ from pathlib import Path
 
 from src.config import DEFAULT_EXPANSION_CONFIG
 from src.corpus_data import CorpusData
-from src.expansion_core import DynamicExpansionCore, build_garbage_mask, evaluate_retrieval
+from src.expansion_core import (
+    DynamicExpansionCore,
+    build_garbage_mask,
+    build_header_mask,
+    evaluate_retrieval,
+)
 
 # Parameter sets to evaluate
 PARAMS_TO_TEST = {
@@ -57,6 +62,10 @@ def evaluate_params(corpus: CorpusData, params: dict) -> dict:
         )
         for a in corpus.articles
     }
+    header_masks = {
+        a.article_id: build_header_mask(a.sentences)
+        for a in corpus.articles
+    }
 
     total_hits = 0
     total_mrr = 0.0
@@ -81,6 +90,7 @@ def evaluate_params(corpus: CorpusData, params: dict) -> dict:
             merge_gap=params["merge_gap"],
             target_clusters=5,
             garbage_mask=garbage_masks.get(question.article_id),
+            header_mask=header_masks.get(question.article_id),
         )
         
         clusters = expander.expand_and_retrieve()

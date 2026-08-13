@@ -1,0 +1,8 @@
+# Same scoring as hpo_mrr_first.yaml, but the ±2 safety net is not a search
+# dimension. max_expand stays >= min_window so every trial actually emits ±2.
+objective:
+  mrr_weight: 0.4
+  token_tiebreak_fraction: 0.05
+search_space:
+  min_window: [2, 2]
+  max_expand: [2, 10]

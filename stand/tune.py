@@ -26,6 +26,7 @@ from src.corpus_data import (
     question_is_valid,
     split_corpus_by_documents,
 )
+from src.seed_retrieval import dual_seed_indices
 from src.utils import build_embedding_texts, split_into_sentences
 
 from . import artifacts, paths
@@ -40,6 +41,21 @@ def _neighbor_sims(embeddings: np.ndarray) -> np.ndarray:
     norms = np.where(norms == 0, 1, norms)
     normalized = embeddings / norms
     return np.sum(normalized[:-1] * normalized[1:], axis=1)
+
+
+def _seed_indices(
+    q_embedding: np.ndarray,
+    phantom_embeddings: np.ndarray,
+    clean_embeddings: np.ndarray | None,
+    k: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Phantom query-sims (for expansion scores) plus dual-seed candidate order."""
+    sentence_sims = _question_sims(q_embedding, phantom_embeddings)
+    k = min(k, len(sentence_sims))
+    clean_sims = None
+    if clean_embeddings is not None:
+        clean_sims = _question_sims(q_embedding, clean_embeddings)
+    return sentence_sims, dual_seed_indices(sentence_sims, clean_sims, k)
 
 
 def _question_sims(q_embedding: np.ndarray, sentence_embeddings: np.ndarray) -> np.ndarray:
@@ -91,10 +107,12 @@ def _embed_articles(
             embed_model.get_text_embedding_batch(embedding_texts), dtype=np.float32
         )
         adjacency_embeddings = embeddings
+        clean_embeddings = None
         if use_clean_adjacency:
             adjacency_embeddings = np.array(
                 embed_model.get_text_embedding_batch(sentences), dtype=np.float32
             )
+            clean_embeddings = adjacency_embeddings
         articles.append(
             ArticleData(
                 article_id=article_id,
@@ -102,6 +120,7 @@ def _embed_articles(
                 sentences=sentences,
                 embeddings=embeddings,
                 neighbor_sims=_neighbor_sims(adjacency_embeddings),
+                clean_embeddings=clean_embeddings,
             )
         )
         if (article_id + 1) % log_stride == 0 or article_id + 1 == total:
@@ -149,9 +168,9 @@ def _build_corpus(
     ):
         answer_sentence = qa.get("answer_sentence", qa.get("answer", ""))
         q_embedding = np.array(raw_embedding, dtype=np.float32)
-        sentence_sims = _question_sims(q_embedding, article.embeddings)
-        k = min(top_k, len(sentence_sims))
-        top_k_indices = np.argsort(sentence_sims)[::-1][:k].astype(np.int32)
+        sentence_sims, top_k_indices = _seed_indices(
+            q_embedding, article.embeddings, article.clean_embeddings, top_k
+        )
         questions.append(
             QuestionData(
                 question_id=qid,
@@ -220,6 +239,13 @@ def _build_shared_corpus(
         min_chunk_length=DEFAULT_EXPANSION_CONFIG.min_chunk_length,
     )
     global_embeddings = np.concatenate([article.embeddings for article in articles], axis=0)
+    global_clean_embeddings = np.concatenate(
+        [
+            article.clean_embeddings if article.clean_embeddings is not None else article.embeddings
+            for article in articles
+        ],
+        axis=0,
+    )
     print(
         f"  [INFO] shared index: {len(global_sentences)} sentences "
         f"across {len(articles)} docs",
@@ -248,9 +274,9 @@ def _build_shared_corpus(
     ):
         answer_sentence = qa.get("answer_sentence", qa.get("answer", ""))
         q_embedding = np.array(raw_embedding, dtype=np.float32)
-        sentence_sims = _question_sims(q_embedding, global_embeddings)
-        k = min(top_k, len(sentence_sims))
-        top_k_indices = np.argsort(sentence_sims)[::-1][:k].astype(np.int32)
+        sentence_sims, top_k_indices = _seed_indices(
+            q_embedding, global_embeddings, global_clean_embeddings, top_k
+        )
         questions.append(
             QuestionData(
                 question_id=qid,
@@ -323,6 +349,13 @@ def _build_extrahard_corpus(
         min_chunk_length=DEFAULT_EXPANSION_CONFIG.min_chunk_length,
     )
     global_embeddings = np.concatenate([article.embeddings for article in articles], axis=0)
+    global_clean_embeddings = np.concatenate(
+        [
+            article.clean_embeddings if article.clean_embeddings is not None else article.embeddings
+            for article in articles
+        ],
+        axis=0,
+    )
     print(
         f"  [INFO] shared index: {len(global_sentences)} sentences "
         f"across {len(articles)} docs",
@@ -371,9 +404,9 @@ def _build_extrahard_corpus(
         zip(pending, question_embeddings, strict=True)
     ):
         q_embedding = np.array(raw_embedding, dtype=np.float32)
-        sentence_sims = _question_sims(q_embedding, global_embeddings)
-        k = min(top_k, len(sentence_sims))
-        top_k_indices = np.argsort(sentence_sims)[::-1][:k].astype(np.int32)
+        sentence_sims, top_k_indices = _seed_indices(
+            q_embedding, global_embeddings, global_clean_embeddings, top_k
+        )
         questions.append(
             QuestionData(
                 question_id=qid,
@@ -420,12 +453,13 @@ def _embedding_mode(phantom_window: int) -> str:
 
     The ``__adj_clean`` suffix is kept so corpora built before clean-only
     adjacency (phantom-adjacency neighbor_sims under the plain
-    ``phantom_wN`` key) are never silently reused. With phantom_window=0
-    the spaces coincide and the suffix is meaningless.
+    ``phantom_wN`` key) are never silently reused. ``__dual_seed`` invalidates
+    caches whose ``top_k_indices`` were phantom-only. With phantom_window=0
+    the spaces coincide and both suffixes are meaningless.
     """
     if phantom_window <= 0:
         return "sentence"
-    return f"phantom_w{phantom_window}__adj_clean"
+    return f"phantom_w{phantom_window}__adj_clean__dual_seed"
 
 
 def _corpus_cache_path(
@@ -537,6 +571,57 @@ def tune(
     dataset: str,
     embedding: str,
     *,
+    strategy: str = "dynamic_semantic",
+    n_trials: int = 100,
+    target_clusters: int = 5,
+    soft_token_limit: int = 1200,
+    rebuild_corpus: bool = False,
+    phantom_window: int = DEFAULT_DYNAMIC_SEMANTIC_CONFIG.phantom_window,
+    train_ratio: float = 0.70,
+    split_seed: int = 42,
+    hpo_config: str | None = None,
+    index_mode: str = "per_document",
+    top_k: int = 5,
+) -> dict:
+    """Run per-domain Optuna HPO and save a tuned-params artifact."""
+    from src.strategy_registry import normalize_strategy_id
+
+    strategy_id = normalize_strategy_id(strategy)
+    if strategy_id != "dynamic_semantic":
+        from .tune_live import tune_live
+
+        return tune_live(
+            dataset,
+            embedding,
+            strategy_id,
+            n_trials=n_trials,
+            top_k=top_k,
+            soft_token_limit=soft_token_limit,
+            train_ratio=train_ratio,
+            split_seed=split_seed,
+            hpo_config=hpo_config,
+            index_mode=index_mode,
+        )
+
+    return _tune_dynamic(
+        dataset,
+        embedding,
+        n_trials=n_trials,
+        target_clusters=target_clusters,
+        soft_token_limit=soft_token_limit,
+        rebuild_corpus=rebuild_corpus,
+        phantom_window=phantom_window,
+        train_ratio=train_ratio,
+        split_seed=split_seed,
+        hpo_config=hpo_config,
+        index_mode=index_mode,
+    )
+
+
+def _tune_dynamic(
+    dataset: str,
+    embedding: str,
+    *,
     n_trials: int = 100,
     target_clusters: int = 5,
     soft_token_limit: int = 1200,
@@ -554,7 +639,7 @@ def tune(
         raise ValueError("Optuna not installed. Run: pip install optuna") from exc
 
     from run_optuna import create_objective, evaluate_params  # reuse exact objective math
-    from src.hpo_config import load_hpo_settings
+    from src.hpo_config import load_hpo_settings, quantize_params
 
     corpus = _load_or_build_corpus(
         dataset,
@@ -579,7 +664,9 @@ def tune(
             "answer sentence (documents may be too short for the min-sentence floor). "
             "Tune on a larger dataset (e.g. qasper/wikipedia)."
         )
-    hpo_settings = load_hpo_settings(path=hpo_config, soft_token_limit=soft_token_limit)
+    hpo_settings = load_hpo_settings(
+        path=hpo_config, soft_token_limit=soft_token_limit, strategy="dynamic_semantic"
+    )
 
     print(
         f"\n[INFO] Running {n_trials} Optuna trials for {dataset} + {embedding} "
@@ -596,17 +683,18 @@ def tune(
     study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
 
     best = study.best_trial
-    params = dict(best.params)
+    params = quantize_params(dict(best.params), hpo_settings.search_space)
     params["phantom_window"] = phantom_window
+    params["dual_seed"] = True
     metrics_train = evaluate_params(
         train_corpus,
-        best.params,
+        params,
         target_clusters=target_clusters,
         hpo_settings=hpo_settings,
     )
     metrics_val = evaluate_params(
         val_corpus,
-        best.params,
+        params,
         target_clusters=target_clusters,
         hpo_settings=hpo_settings,
     )
@@ -627,13 +715,16 @@ def tune(
             "phantom_window": phantom_window,
             "train_articles": len(train_corpus.articles),
             "val_articles": len(val_corpus.articles),
-            # Scoring policy: hard token wall at soft_token_limit (an aligned
-            # budget vs the fixed-window baseline), HR first, token savings a
-            # strict sub-HR tie-breaker, MRR last. See ObjectivePolicy.
+            # Scoring policy: soft token term around soft_token_limit (a
+            # reference vs the fixed-window baseline, not a veto). Under it,
+            # token savings are a sub-HR tie-breaker; above it the penalty
+            # accelerates with excess. See ObjectivePolicy.
             "objective": asdict(hpo_settings.objective),
             "hpo_config": hpo_config,
             "corpus_kind": corpus.kind,
             "index_mode": "shared" if corpus.kind == "shared" else "per_document",
+            "strategy": "dynamic_semantic",
+            "path": "cached",
         },
     )
 
@@ -644,7 +735,7 @@ def tune(
           f"val_MRR={metrics_val['mrr']:.4f} "
           f"val_tokens={metrics_val['avg_tokens']:.0f}")
     print("Best params:")
-    for key, value in best.params.items():
+    for key, value in params.items():
         print(f"   {key}: {value}")
     print(f"\n[OK] Tuned artifact saved: {target}")
     print(f"     Use it with: --params tuned (dataset '{dataset}', embedding '{embedding}')")

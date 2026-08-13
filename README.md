@@ -27,17 +27,24 @@ context. The current implementation focuses on:
 - dual-space embeddings: phantom embeddings (sentence + neighbors) for
   matching against the query, clean per-sentence embeddings for deciding
   where the topic ends and expansion must stop;
+- dual-seed retrieval: interleave phantom and clean top-k so the first seed
+  is not only a phantom blob (Fixed Window still matches clean sentences);
 - two-pass retrieval: broad candidate search followed by refined expansion;
 - adaptive expansion driven by adjacency similarity in the clean space;
-- query-aware filtering while expanding neighboring sentences.
+- query-aware filtering, skip/bridge, and jumping section titles without
+  spending an expand step;
+- a document boundary: clusters never merge across articles.
 
 Parameters are tuned per domain (`stand tune`). The strategy is always
 evaluated with tuned params: the values shipped in `src/config.py` are
 legacy artifacts of the pre-fix retrieval path (pseudo-defaults), not a
 meaningful configuration.
 
-The main comparison point is whether this strategy can keep ranking quality high
-while reducing tokens returned to the downstream LLM.
+The main comparison is whether ranking quality stays high at a comparable
+(or smaller) token budget. On compound cross-document questions a second
+operating point matters too: if the downstream can spend more context,
+joint recall can keep climbing — and that gain does not come from simply
+widening Fixed Window.
 
 ## Installation
 
@@ -199,7 +206,7 @@ Use `mock/mock:384` only for infrastructure smoke tests.
 
 ## Benchmark Results (2026-07-05): wiki_300, cross-document
 
-Latest results on the larger `wiki_300` family: 297 English Wikipedia
+Matched-budget snapshot on the larger `wiki_300` family: 297 English Wikipedia
 articles, embedding `openai/text-embedding-3-small`, shared index only
 (corpus-wide competition, as in production RAG). Three difficulty tiers:
 
@@ -259,6 +266,90 @@ Result files:
 `results/benchmark_wiki_300_qa_shared_20260705_171504.json`,
 `results/benchmark_wiki_300_qa_hard_shared_20260705_214508.json`,
 `results/benchmark_wiki_300_qa_extrahard_shared_20260705_215946.json`.
+
+## Follow-up (2026-08-13): dual-seed, two budgets, transfer
+
+The July tables stay the published matched-budget snapshot (hard and
+extrahard both used params tuned on extrahard). This section is a later
+stack on the same stand: dual-seed, header skip, quadratic token-overage
+in HPO (no hard 1200-token wall), float params quantized to two decimals.
+Per-tier retunes; not a silent replacement of the family above.
+
+### wiki_300_qa_hard — retuned on hard, top_k=5
+
+500 Optuna trials on `wiki_300_qa_hard` itself. Three unchunkable
+list-like articles were dropped (9 questions), so this is 889 questions,
+not the July 898. Baselines therefore shift slightly versus the snapshot.
+
+| Strategy | Tokens | HR@5 | MRR | P@5 | NDCG@5 |
+|----------|-------:|-----:|----:|----:|-------:|
+| Naive Chunking | 1122.9 | 0.8290 | 0.6497 | 0.1739 | 0.6932 |
+| Fixed Window | 1146.6 | 0.9246 | 0.7969 | 0.3062 | 0.8090 |
+| Token Text Splitter | 1221.5 | 0.8133 | 0.6289 | 0.1681 | 0.6744 |
+| Semantic Splitter | 1284.2 | 0.8178 | 0.6331 | 0.1645 | 0.6792 |
+| **Dynamic Semantic (tuned on hard)** | 1463.0 | **0.9381** | **0.8516** | 0.1883 | **0.8735** |
+
+Vs Fixed Window: ΔHR +1.4 pp, 95% CI [−0.2, +2.8], ns; ΔMRR +5.5 pp
+[+3.4, +7.6], significant. More tokens than July's extrahard-tuned hard
+run (1265). Result:
+`results/benchmark_wiki_300_qa_hard_shared_20260813_185356.json`.
+
+### wiki_300_qa_extrahard — two operating points, top_k=10
+
+**Matched budget** is the July table: 2772 tokens, joint HR@10 0.587 vs
+Fixed Window ±3 at 2395 / 0.430 (+15.7 pp) at comparable spend.
+
+**Unconstrained.** The same 1200-token *reference* in HPO with a
+quadratic overage penalty. Joint HR is valuable enough that Optuna still
+maxes the window (`min_window=5`, `max_expand=10`, `threshold=0.36`).
+Full test, 1775 compound questions:
+
+| Strategy | Tokens | HR@10 | Partial HR@10 | MRR | NDCG@10 |
+|----------|-------:|------:|--------------:|----:|--------:|
+| Fixed Window ±3 (library default) | 2395.1 | 0.4304 | 0.9741 | 0.4537 | 0.6296 |
+| Fixed Window ±10 (token-budget ablation) | 6428.3 | 0.4817 | 0.9893 | 0.4950 | 0.6781 |
+| **Dynamic Semantic (unconstrained tune)** | **7030.8** | **0.6997** | **0.9899** | **0.5935** | **0.8038** |
+
+±3 → ±10 costs Fixed Window ~2.7× tokens (short articles cannot fill
+±10) and buys only +5.1 pp joint HR. Dynamic at a similar budget is
+still +21.8 pp joint HR@10 vs that wide Fixed Window, CI [+19.7, +23.9],
+significant; +9.9 pp MRR, also significant. Partial HR is already tied
+(~0.99): both find *something*. The gap is finding **both** documents.
+
+**Hypothesis.** Extra tokens in Fixed Window pad neighbors of the same
+seed article. Extra tokens in Dynamic can become a second cluster in the
+other answer document (prefetch, dual-seed, no cross-doc merge). Widening
+`window_size` does not reproduce the unconstrained Dynamic gain.
+
+Result files:
+`results/benchmark_wiki_300_qa_extrahard_shared_20260813_200711.json`
+(all five strategies, Dynamic unconstrained vs ±3),
+`results/benchmark_wiki_300_qa_extrahard_shared_20260813_204405.json`
+(paired Dynamic vs ±10). July matched-budget extrahard params are kept
+at `artifacts/tuned/wiki_300_qa_extrahard__openai-small/manifest.baseline_20260705.json`.
+
+### qasper_100_qa_hard — transfer, top_k=5
+
+100 QASPER validation papers, 299 paraphrased questions, `openai-small`,
+shared index. Dual-seed and header skip were motivated by this set
+(wrong phantom seed; gold a few sentences past a section title such as
+`Methodology`). 2000-trial tune, quadratic overage.
+
+| Strategy | Tokens | HR@5 | MRR | NDCG@5 |
+|----------|-------:|-----:|----:|-------:|
+| Fixed Window ±3 | 1054.2 | **0.7425** | **0.5669** | 0.5984 |
+| Dynamic Semantic (tuned) | 1460.1 | 0.7391 | 0.5485 | 0.5962 |
+
+ΔHR −0.3 pp vs Fixed Window, CI [−4.4, +3.7], ns; ΔMRR −1.8 pp, also ns.
+Naive / Token / Semantic sit at HR ~0.45–0.47 on this set. Transfer to
+scholarly papers is a **tie at a higher token budget**, not a wiki-style
+win. Hypothesis: section-title cliffs and phantom-first seeds were the
+wiki-tuned failure modes; after dual-seed and header skip, remaining
+adjacency on papers is closer to a short Fixed Window than to a long
+wiki article. Result:
+`results/benchmark_qasper_100_qa_hard_shared_20260813_180602.json`.
+QASPER baseline params:
+`artifacts/tuned/qasper_100_qa_hard__openai-small/manifest.baseline.json`.
 
 ## Benchmark Results (2026-07-04): wiki_100, bge-small
 
@@ -351,7 +442,8 @@ tuned dynamic
   and ΔHR is positive but within noise (+0.030 / +0.017) at ~18%/11% fewer
   tokens. In the per-document diagnostic ΔHR vs Fixed Window is significant
   on hard (+0.037 [+0.007, +0.067]). HR is never significantly below any
-  baseline anywhere. Full CI tables: `docs/improvement_plan.md`, step 1.2.
+  baseline anywhere. Full CI tables come from `stand significance` on the
+  result JSON files listed above.
 - Low P@5 for Dynamic Semantic is expected: merged clusters mean fewer,
   larger retrieved units, which P@5 penalizes regardless of context quality.
 

@@ -53,3 +53,6 @@ artifacts/
 
 # FinanceBench downloaded questions + filing PDFs
 data/financebench_cache/
+
+# Local notes and talk drafts (not part of the published stand)
+docs/

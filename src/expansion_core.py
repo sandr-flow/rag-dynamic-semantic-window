@@ -19,8 +19,10 @@ Resolved divergences between the two historic implementations
   beyond)`` — rather than the old benchmark path's two-step ``sim(current,
   beyond)``, which cannot be derived from adjacency arrays;
 - merged clusters are returned sorted by seed score;
-- garbage sentences (too short / reference sections) trim cluster edges via
-  an optional precomputed mask instead of post-hoc node filtering;
+- garbage sentences (too short / reference sections / headings) trim cluster
+  edges via an optional precomputed mask instead of post-hoc node filtering;
+- section headers are jumped during expansion so a heading cliff does not
+  stop the window short of the next content sentence;
 - seed validation (Modified Z-score) was removed: it was disabled by default
   and rejected valid seeds (see docs/math_foundations.md, section A).
 """
@@ -41,6 +43,109 @@ GARBAGE_PATTERNS = re.compile(
     r"^\s*(References|See also|External links|Notes|Bibliography|Further reading)",
     re.IGNORECASE,
 )
+
+# Consecutive section titles jumped without spending an expand step.
+MAX_HEADER_SKIP = 3
+
+# Numbered / lettered prefixes: "3.", "3.1.2", "3 Methodology", "IV.", "A."
+_HEADER_NUMBERING = re.compile(
+    r"^(?:(?:\d+(?:\.\d+)*)[.)]?|(?:[IVXLCM]{1,8}|[A-Z])[.)])\s+",
+)
+
+_FIGURE_TABLE = re.compile(
+    r"^(?:figure|table|eq(?:uation)?|fig\.|tab\.)\b",
+    re.IGNORECASE,
+)
+
+# Common IMRaD / wiki headings. Unknown Title-Case headings (2+ words) are
+# still detected below; this set covers single-word titles like "Methodology".
+_SECTION_TITLES = frozenset(
+    {
+        "abstract",
+        "acknowledgements",
+        "acknowledgments",
+        "analysis",
+        "appendix",
+        "approach",
+        "background",
+        "bibliography",
+        "broader impact",
+        "case study",
+        "conclusion",
+        "conclusions",
+        "dataset",
+        "datasets",
+        "discussion",
+        "error analysis",
+        "ethical considerations",
+        "evaluation",
+        "experiment",
+        "experimental results",
+        "experimental setup",
+        "experiments",
+        "external links",
+        "further reading",
+        "future work",
+        "implementation",
+        "inference",
+        "introduction",
+        "limitations",
+        "method",
+        "methodology",
+        "methods",
+        "model",
+        "notation",
+        "notes",
+        "our approach",
+        "overview",
+        "preliminaries",
+        "problem formulation",
+        "problem statement",
+        "proposed approach",
+        "proposed method",
+        "qualitative analysis",
+        "references",
+        "related work",
+        "related works",
+        "results",
+        "results and discussion",
+        "see also",
+        "setup",
+        "task definition",
+        "training",
+    }
+)
+
+
+def is_section_header(text: str) -> bool:
+    """True for heading-like lines (IMRaD titles, numbered sections, Title Case)."""
+    raw = text.strip()
+    if not raw or len(raw) > 80:
+        return False
+    stripped = re.sub(r"^[=#*]+\s*|\s*[=#*]+$", "", raw).strip().rstrip(":")
+    if not stripped or _FIGURE_TABLE.match(stripped):
+        return False
+    body = _HEADER_NUMBERING.sub("", stripped, count=1).strip()
+    if not body or body[-1] in ".?!":
+        return False
+    words = body.split()
+    if not 1 <= len(words) <= 8:
+        return False
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9 ,\-/&'()]*", body):
+        return False
+    key = re.sub(r"\s+", " ", body.lower())
+    if key in _SECTION_TITLES:
+        return True
+    if body.isupper() and len(body) >= 4:
+        return True
+    if len(words) >= 2 and all(word[0].isupper() for word in words if word[0].isalpha()):
+        return True
+    return False
+
+
+def build_header_mask(sentences: list[str]) -> np.ndarray:
+    """Boolean mask of section-header sentences (True = jump during expansion)."""
+    return np.array([is_section_header(sentence) for sentence in sentences], dtype=bool)
 
 
 @dataclass
@@ -68,7 +173,11 @@ def build_garbage_mask(
     mask = np.zeros(len(sentences), dtype=bool)
     for i, sentence in enumerate(sentences):
         text = sentence.strip()
-        if len(text) < min_chunk_length or GARBAGE_PATTERNS.match(text):
+        if (
+            len(text) < min_chunk_length
+            or GARBAGE_PATTERNS.match(text)
+            or is_section_header(text)
+        ):
             mask[i] = True
     return mask
 
@@ -88,6 +197,9 @@ class DynamicExpansionCore:
     - query-aware fallback: a neighbor failing the adjacency check is still
       included when it is directly relevant to the query;
     - skip logic bridges one weak sentence when the pair beyond it is strong;
+    - section headers are jumped without spending an expand step; the first
+      content sentence after a heading is taken without an adjacency check
+      (the heading-to-content pair is a false cliff);
     - gradient stop halts on a semantic cliff (sharp acceleration of the
       similarity drop) when the adaptive threshold is enabled.
 
@@ -112,6 +224,8 @@ class DynamicExpansionCore:
             adaptive decay then anchors on a neutral seed score of 1.0.
         garbage_mask: Optional boolean mask (True = garbage); garbage
             sentences are trimmed from cluster edges, empty clusters dropped.
+        header_mask: Optional boolean mask (True = section header). Headers
+            are jumped during expansion and trimmed from cluster edges.
         segment_ids: Optional segment/document id per sentence. Expansion and
             merge never cross segment boundaries.
     """
@@ -137,6 +251,7 @@ class DynamicExpansionCore:
         gradient_cliff_factor: float = DEFAULT_ADAPTIVE_THRESHOLD_CONFIG.gradient_cliff_factor,
         query_aware_enabled: bool = True,
         garbage_mask: np.ndarray | None = None,
+        header_mask: np.ndarray | None = None,
         segment_ids: np.ndarray | list[str] | None = None,
     ):
         self.neighbor_sims = neighbor_sims
@@ -162,6 +277,9 @@ class DynamicExpansionCore:
 
         self.query_aware_enabled = query_aware_enabled
         self.garbage_mask = garbage_mask
+        self.header_mask = header_mask
+        if self.header_mask is not None and len(self.header_mask) != self.num_sentences:
+            raise ValueError("header_mask must be aligned with sentence_sims")
         self.segment_ids = (
             np.asarray(segment_ids, dtype=object) if segment_ids is not None else None
         )
@@ -246,11 +364,12 @@ class DynamicExpansionCore:
         left_idx = seed_idx
         left_scores: list[float] = []
         for i in range(self.max_expand):
+            left_idx, jumped_header = self._jump_headers(seed_idx, left_idx, -1)
             next_left = left_idx - 1
             if next_left < 0 or not self._same_segment(seed_idx, next_left):
                 break
 
-            if i >= self.min_window:
+            if i >= self.min_window and not jumped_header:
                 adj_sim = (
                     float(self.neighbor_sims[next_left])
                     if next_left < len(self.neighbor_sims)
@@ -287,13 +406,14 @@ class DynamicExpansionCore:
         right_idx = seed_idx
         right_scores: list[float] = []
         for i in range(self.max_expand):
+            right_idx, jumped_header = self._jump_headers(seed_idx, right_idx, 1)
             next_right = right_idx + 1
             if next_right >= self.num_sentences or not self._same_segment(
                 seed_idx, next_right
             ):
                 break
 
-            if i >= self.min_window:
+            if i >= self.min_window and not jumped_header:
                 adj_sim = (
                     float(self.neighbor_sims[right_idx])
                     if right_idx < len(self.neighbor_sims)
@@ -336,6 +456,29 @@ class DynamicExpansionCore:
         if self.segment_ids is None:
             return True
         return self.segment_ids[seed_idx] == self.segment_ids[candidate_idx]
+
+    def _is_header(self, idx: int) -> bool:
+        return self.header_mask is not None and bool(self.header_mask[idx])
+
+    def _is_edge_noise(self, idx: int) -> bool:
+        if self.garbage_mask is not None and bool(self.garbage_mask[idx]):
+            return True
+        return self._is_header(idx)
+
+    def _jump_headers(self, seed_idx: int, idx: int, step: int) -> tuple[int, bool]:
+        """Include consecutive section titles in the span without spending a step."""
+        jumped = False
+        n_skipped = 0
+        while n_skipped < MAX_HEADER_SKIP:
+            nxt = idx + step
+            if nxt < 0 or nxt >= self.num_sentences:
+                break
+            if not self._same_segment(seed_idx, nxt) or not self._is_header(nxt):
+                break
+            idx = nxt
+            jumped = True
+            n_skipped += 1
+        return idx, jumped
 
     def _adaptive_threshold(
         self,
@@ -382,14 +525,16 @@ class DynamicExpansionCore:
         return gradients[-1] / prev_gradient < self.gradient_cliff_factor
 
     def _trim_garbage(self, cluster: ExpandedCluster | None) -> ExpandedCluster | None:
-        """Trim garbage sentences from cluster edges; drop empty clusters."""
-        if cluster is None or self.garbage_mask is None:
+        """Trim garbage/header sentences from cluster edges; drop empty clusters."""
+        if cluster is None:
+            return cluster
+        if self.garbage_mask is None and self.header_mask is None:
             return cluster
 
         start, end = cluster.start_idx, cluster.end_idx
-        while start <= end and self.garbage_mask[start]:
+        while start <= end and self._is_edge_noise(start):
             start += 1
-        while end >= start and self.garbage_mask[end]:
+        while end >= start and self._is_edge_noise(end):
             end -= 1
         if start > end:
             return None

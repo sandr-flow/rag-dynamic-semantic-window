@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from src.answer_matching import find_answer_sentence_idx as _find_answer_sentence_idx
+from src.seed_retrieval import dual_seed_indices
 
 
 @dataclass
@@ -22,6 +23,8 @@ class ArticleData:
         neighbor_sims: Cosine similarity between adjacent sentences,
                        shape (num_sentences-1,). neighbor_sims[i] = cos(S_i, S_{i+1}).
                        Computed in ``CorpusData.adjacency_space``.
+        clean_embeddings: Per-sentence embeddings used for dual-seed ranking
+            (Fixed Window matching). None when phantom_window=0.
     """
 
     article_id: int
@@ -29,6 +32,7 @@ class ArticleData:
     sentences: list[str]
     embeddings: np.ndarray  # Shape: (num_sentences, embed_dim)
     neighbor_sims: np.ndarray  # Shape: (num_sentences-1,)
+    clean_embeddings: np.ndarray | None = None
 
 
 @dataclass
@@ -45,7 +49,8 @@ class QuestionData:
         embedding: Question embedding, shape (embed_dim,).
         sentence_sims: Cosine similarity to all sentences in the article,
                        shape (num_sentences,). sentence_sims[i] = cos(Q, S_i).
-        top_k_indices: Top-K sentence indices by similarity (pre-computed retrieval).
+        top_k_indices: Candidate seed indices in rank-interleave order
+            (phantom ∪ clean when dual-seed is on; length ≤ 2 * top_k).
         source_article_ids: For shared-index compound questions, article ids of
             every answer-bearing document (empty for per-document questions).
         answer_local_indices: Parallel local sentence indices inside each
@@ -203,10 +208,23 @@ def build_shared_global_arrays(
     )
 
 
+def _article_clean_embeddings(article: ArticleData) -> np.ndarray:
+    if article.clean_embeddings is not None:
+        return article.clean_embeddings
+    return article.embeddings
+
+
+def _concat_clean_embeddings(articles: list[ArticleData], embed_dim: int) -> np.ndarray:
+    if not articles:
+        return np.zeros((0, embed_dim), dtype=np.float32)
+    return np.concatenate([_article_clean_embeddings(article) for article in articles], axis=0)
+
+
 def _reindex_question_for_shared(
     question: QuestionData,
     corpus: CorpusData,
     global_embeddings: np.ndarray,
+    global_clean_embeddings: np.ndarray | None = None,
 ) -> QuestionData:
     """Recompute query similarities after a shared corpus subset."""
     norms = np.linalg.norm(global_embeddings, axis=1, keepdims=True)
@@ -216,7 +234,14 @@ def _reindex_question_for_shared(
     q = question.embedding / q_norm if q_norm > 0 else question.embedding
     sentence_sims = normalized @ q
     k = min(corpus.top_k, len(sentence_sims))
-    top_k_indices = np.argsort(sentence_sims)[::-1][:k].astype(np.int32)
+    clean_sims = None
+    if global_clean_embeddings is not None and len(global_clean_embeddings) == len(
+        global_embeddings
+    ):
+        clean_norms = np.linalg.norm(global_clean_embeddings, axis=1, keepdims=True)
+        clean_norms = np.where(clean_norms == 0, 1, clean_norms)
+        clean_sims = (global_clean_embeddings / clean_norms) @ q
+    top_k_indices = dual_seed_indices(sentence_sims, clean_sims, k)
     return QuestionData(
         question_id=question.question_id,
         article_id=question.article_id,
@@ -274,13 +299,21 @@ def subset_corpus_by_article_ids(corpus: CorpusData, article_ids: set[int]) -> C
     )
 
     questions: list[QuestionData] = []
+    global_clean_embeddings = _concat_clean_embeddings(articles, corpus.embed_dim)
     for question in corpus.questions:
         # Compound questions carry every source doc; single-answer ones only
         # live in their own article. Both must survive a shared-corpus subset.
         source_ids = question.source_article_ids or [question.article_id]
         if not all(article_id in selected for article_id in source_ids):
             continue
-        questions.append(_reindex_question_for_shared(question, corpus, global_embeddings))
+        questions.append(
+            _reindex_question_for_shared(
+                question,
+                corpus,
+                global_embeddings,
+                global_clean_embeddings=global_clean_embeddings,
+            )
+        )
 
     return CorpusData(
         articles=articles,

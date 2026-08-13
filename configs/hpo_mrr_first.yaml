@@ -1,6 +1,11 @@
-# HR first, MRR second, tokens as the last tie-breaker.
+# HR first, MRR second. Tokens: small bonus below --soft-token-limit, then a
+# quadratic penalty on excess (not a hard wall). ~1.25x the reference is
+# cheaper than one extra hit; ~1.5x already costs more than one hit, so
+# Optuna must expand by threshold rather than by a fat min_window.
 # Default mrr_weight=0.01 made MRR worth less than a 3-token saving, so the
 # tuner traded away the metric the method actually wins on.
 objective:
   mrr_weight: 0.4
   token_tiebreak_fraction: 0.05
+  token_overage_power: 2.0
+  token_overage_scale: 10.0

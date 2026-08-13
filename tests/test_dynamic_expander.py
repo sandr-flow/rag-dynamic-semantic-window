@@ -12,7 +12,7 @@ import pytest
 from llama_index.core.schema import NodeWithScore
 
 from src.dynamic_retriever import DynamicSemanticExpander
-from src.expansion_core import DynamicExpansionCore, build_garbage_mask
+from src.expansion_core import DynamicExpansionCore, build_garbage_mask, build_header_mask
 from src.utils import create_sentence_nodes
 
 
@@ -148,6 +148,7 @@ def test_dual_space_adapter_matches_core(seed):
         sentence_sims=sentence_sims,
         top_k_indices=order,
         garbage_mask=build_garbage_mask(sentences),
+        header_mask=build_header_mask(sentences),
         **params,
     )
     expected = core.expand_and_retrieve()
@@ -193,6 +194,8 @@ def _random_case(rng: np.random.Generator):
             sentences.append("Ok.")  # short -> garbage
         elif roll < 0.08:
             sentences.append("References and other external reading material.")
+        elif roll < 0.11:
+            sentences.append("Methodology")
         else:
             sentences.append(f"Sentence {i} " + "content " * int(rng.integers(3, 10)))
 
@@ -228,6 +231,7 @@ def test_adapter_matches_core_on_random_corpora(seed):
         sentence_sims=sentence_sims,
         top_k_indices=order,
         garbage_mask=build_garbage_mask(sentences),
+        header_mask=build_header_mask(sentences),
         **params,
     )
     expected = core.expand_and_retrieve()

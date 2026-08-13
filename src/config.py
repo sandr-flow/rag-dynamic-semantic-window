@@ -167,6 +167,9 @@ class DynamicSemanticConfig:
     prefetch_multiplier: int = 2
     """Two-pass retrieval: fetch top_k * multiplier, then filter to top_k."""
 
+    dual_seed: bool = True
+    """Union phantom top-k seeds with clean-sentence top-k (Fixed Window matching)."""
+
 
 @dataclass
 class RetrievalConfig:

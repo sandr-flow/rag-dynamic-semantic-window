@@ -17,7 +17,7 @@ from llama_index.core.schema import NodeWithScore, QueryBundle, TextNode
 from pydantic import ConfigDict, PrivateAttr
 
 from src.config import DEFAULT_ADAPTIVE_THRESHOLD_CONFIG, DEFAULT_EXPANSION_CONFIG
-from src.expansion_core import DynamicExpansionCore, build_garbage_mask
+from src.expansion_core import DynamicExpansionCore, build_garbage_mask, build_header_mask
 
 
 class DynamicSemanticExpander(BaseNodePostprocessor):
@@ -82,6 +82,7 @@ class DynamicSemanticExpander(BaseNodePostprocessor):
     _normalized: np.ndarray | None = PrivateAttr(default=None)
     _neighbor_sims: np.ndarray | None = PrivateAttr(default=None)
     _garbage_mask: np.ndarray | None = PrivateAttr(default=None)
+    _header_mask: np.ndarray | None = PrivateAttr(default=None)
     _id_to_pos: dict = PrivateAttr(default_factory=dict)
     _segment_ids: np.ndarray | None = PrivateAttr(default=None)
 
@@ -116,6 +117,7 @@ class DynamicSemanticExpander(BaseNodePostprocessor):
             else np.array([], dtype=np.float32)
         )
         self._garbage_mask = build_garbage_mask(self.sentences, self.min_chunk_length)
+        self._header_mask = build_header_mask(self.sentences)
         self._id_to_pos = {node_id: pos for pos, node_id in enumerate(self.node_ids)}
         self._segment_ids = np.asarray(
             self.doc_ids if self.doc_ids is not None else ["doc"] * len(self.sentences),
@@ -206,6 +208,7 @@ class DynamicSemanticExpander(BaseNodePostprocessor):
             gradient_cliff_factor=self.gradient_cliff_factor,
             query_aware_enabled=query_aware,
             garbage_mask=self._garbage_mask,
+            header_mask=self._header_mask,
             segment_ids=self._segment_ids,
         )
         clusters = core.expand_and_retrieve()

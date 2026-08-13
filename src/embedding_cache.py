@@ -223,8 +223,14 @@ class EmbeddingStore:
         started = time.time()
         keys = list(self._pending)
         vectors = np.stack([self._pending[k] for k in keys])
-        self._seq += 1
-        stem = self._write_shard(keys, vectors, f"shard-{os.getpid()}-{self._seq:04d}")
+        self._dir.mkdir(parents=True, exist_ok=True)
+        while True:
+            self._seq += 1
+            name = f"shard-{os.getpid()}-{self._seq:04d}"
+            stem = self._dir / name
+            if not stem.with_suffix(".npy").exists() and not stem.with_suffix(".json").exists():
+                break
+        stem = self._write_shard(keys, vectors, name)
         self._pending = {}
         self._attach_shard(stem)
         print(
